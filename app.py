@@ -60,12 +60,19 @@ def optimize_portfolio(names, target_r):
     return w, w @ rets, np.sqrt(w.T @ cov @ w)
 
 def get_data(symbol):
-    return yf.download(symbol, period="1y", progress=False)
+    try:
+        df = yf.download(symbol, period="1y", progress=False, timeout=10)
+        if df is None or df.empty:
+            raise ValueError("No data")
+        return df
+    except Exception as e:
+        st.error(f"Data fetch failed: {e}")
+        return None
 
 def get_fear_greed():
     try:
         url = "https://production.dataviz.cnn.io/index/feargreed/graphdata"
-        res = requests.get(url, timeout=5)
+        res = requests.get(url, timeout=3)
         return float(res.json()["fear_and_greed"]["score"])
     except:
         return 50
@@ -84,6 +91,13 @@ with st.sidebar:
 # =========================================================
 # ------------------- MAIN --------------------------------
 # =========================================================
+if "run" not in st.session_state:
+    st.session_state.run = False
+
+if st.button("Run System"):
+    st.session_state.run = True
+
+if st.session_state.run:
 
 if st.button("Run System"):
 
@@ -100,6 +114,9 @@ if st.button("Run System"):
 
     # ---------------- Market Data ----------------
     df = get_data(ticker)
+    if df is None or "Close" not in df:
+    st.error("Failed to load market data")
+    st.stop()
     close = df["Close"]
 
     ma200 = close.rolling(200).mean()
