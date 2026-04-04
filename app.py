@@ -162,10 +162,22 @@ def _load_disk_cache():
 # UNIVERSE LOADERS  (cached globally — loaded once)
 # ───────────────────────────────────────────────────────────────────
 
+def _find_file(filename):
+    """Find a data file — works locally and on Streamlit Community Cloud."""
+    candidates = [
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), filename),
+        os.path.join(os.getcwd(), filename),
+        filename,
+    ]
+    for p in candidates:
+        if os.path.exists(p):
+            return p
+    return None
+
 @st.cache_data(ttl=3600)
 def load_base_universe():
-    csv_path = os.path.join(os.path.dirname(__file__), "universe.csv")
-    if os.path.exists(csv_path):
+    csv_path = _find_file("universe.csv")
+    if csv_path and os.path.exists(csv_path):
         try:
             df = pd.read_csv(csv_path)
             for col in ["country","sector","name","category_group","category",
@@ -241,8 +253,8 @@ def load_justetf():
 
 @st.cache_data(ttl=3600)
 def load_signals():
-    path = os.path.join(os.path.dirname(__file__), "signals.csv")
-    if not os.path.exists(path):
+    path = _find_file("signals.csv")
+    if not path:
         return pd.DataFrame()
     try:
         df = pd.read_csv(path)
