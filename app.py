@@ -279,13 +279,17 @@ def get_signals_df():
     """Return signals_df, preferring session-level live-updated version."""
     return st.session_state.get("signals_df", signals_df_global)
 
-def update_signals_df(new_row_dict):
-    """Write a fresh signal row into session-level signals_df."""
+def update_signals_df(new_row_dict, source_tab=None):
+    """Write a fresh signal row into session-level signals_df.
+    source_tab: tag the update so other tabs can ignore mid-render reruns.
+    """
     sdf = get_signals_df().copy()
     if not sdf.empty and "ticker" in sdf.columns:
         sdf = sdf[sdf["ticker"] != new_row_dict["ticker"]]
     sdf = pd.concat([pd.DataFrame([new_row_dict]), sdf], ignore_index=True)
     st.session_state["signals_df"] = sdf
+    if source_tab:
+        st.session_state["_signals_updated_by"] = source_tab
 
 # Build name/ISIN lookup
 _name_lookup = {}
@@ -359,35 +363,33 @@ def get_fg_index():
     cached = cache_get("fg")
     if cached is not None:
         return cached
-    headers = {"User-Agent": "Mozilla/5.0"}
-    today = date.today().strftime("%Y-%m-%d")
-    for url in [
-        "https://production.dataviz.cnn.io/index/fearandgreed/graphdata",
-        f"https://production.dataviz.cnn.io/index/fearandgreed/graphdata/{today}",
-    ]:
-        try:
-            r = requests.get(url, headers=headers, timeout=6)
-            if r.status_code == 200:
-                fg = r.json().get("fear_and_greed", {})
-                if "score" in fg:
-                    s     = round(float(fg["score"]))
-                    label = fg.get("rating","").replace("_"," ").title()
-                    result = (s, f"{label} (CNN)")
-                    cache_set("fg", result, ttl=1800)
-                    return result
-        except Exception:
-            continue
+
+    # Primary: fear-greed PyPI package — uses CNN internal API directly
     try:
+        import fear_greed
+        data  = fear_greed.get()
+        s     = round(float(data["score"]))
+        label = str(data.get("rating","")).replace("_"," ").title()
+        result = (s, f"{label} (CNN)")
+        cache_set("fg", result, ttl=1800)
+        return result
+    except Exception:
+        pass
+
+    # Fallback: alt.me — crypto F&G, clearly labelled as such
+    try:
+        headers = {"User-Agent": "Mozilla/5.0"}
         r = requests.get("https://api.alternative.me/fng/?limit=1", headers=headers, timeout=6)
         if r.status_code == 200:
-            e = r.json().get("data", [{}])[0]
+            e     = r.json().get("data", [{}])[0]
             s     = round(float(e.get("value", 50)))
             label = e.get("value_classification","").replace("_"," ").title()
-            result = (s, f"{label} (alt.me)")
+            result = (s, f"{label} (alt.me crypto — CNN unavailable)")
             cache_set("fg", result, ttl=1800)
             return result
     except Exception:
         pass
+
     return (50, "Unavailable")
 
 
@@ -1037,14 +1039,20 @@ PRESETS = {
 }
 
 def build_tickers(preset_key, filters):
-    if universe.empty:
-        return []
     preset = PRESETS.get(preset_key, {"type":"ETF"})
     ptype  = preset.get("type","ETF")
     tickers = []
 
+    sdf = get_signals_df()
+
     if ptype in ("ETF","custom"):
-        src_df = jetf_df if not jetf_df.empty else universe[universe["type"]=="ETF"]
+        # Primary: jetf_df (when justetf-scraping is installed)
+        # Secondary: universe ETFs
+        # Fallback: all ETF tickers already in signals.csv — always works on Community Cloud
+        src_df = (jetf_df if not jetf_df.empty
+                  else universe[universe["type"]=="ETF"] if not universe.empty
+                  else pd.DataFrame())
+
         if not src_df.empty:
             mask = pd.Series([True]*len(src_df), index=src_df.index)
             if "domicile" in preset and "domicile" in src_df.columns:
@@ -1059,6 +1067,13 @@ def build_tickers(preset_key, filters):
                 mask &= src_df["ter"].fillna(99) <= filters["max_ter"]
             tcol = "ticker" if "ticker" in src_df.columns else src_df.columns[0]
             tickers += src_df[mask][tcol].dropna().str.upper().tolist()
+        elif not sdf.empty and "ticker" in sdf.columns:
+            # Fallback: use ETF tickers from signals.csv directly
+            etf_col = "type" if "type" in sdf.columns else None
+            if etf_col:
+                tickers += sdf[sdf[etf_col]=="ETF"]["ticker"].dropna().str.upper().tolist()
+            else:
+                tickers += sdf["ticker"].dropna().str.upper().tolist()
 
     if ptype in ("Stock","custom"):
         if not universe.empty:
@@ -1223,9 +1238,13 @@ def render_scanner(tickers, budget, workers, fetch_pe, vix, fg, rm):
         if sdf.empty:
             st.warning("No signals.csv loaded. Commit signals.csv to your repo and redeploy.")
             return
-        sig = sdf[sdf["ticker"].isin(tickers)].copy()
+        sig = sdf[sdf["ticker"].isin(tickers)].copy() if tickers else sdf.copy()
+        if len(sig) == 0 and not sdf.empty:
+            # Last resort: show all signals regardless of preset filter
+            sig = sdf.copy()
+            st.caption("⚠️ Universe filter produced no matches — showing all signals.csv tickers.")
         if len(sig) == 0:
-            st.warning("No pre-computed signals match the current preset/filters.")
+            st.warning("No pre-computed signals found. Ensure signals.csv is committed to the repo.")
             return
         with st.spinner(f"⚡ Loading {len(sig)} pre-computed signals…"):
             budget_val = budget or 1000
@@ -1604,7 +1623,7 @@ def render_deepdive(budget):
                 bdown_str = " · ".join(f"{k}: {v}/100" for k,v in value_bdown.items())
                 st.caption(bdown_str)
 
-    # Write back to session signals_df
+    # Write back to session signals_df (tagged so value screen doesn't re-trigger)
     update_signals_df({
         "ticker": ticker, "data_source": "live_deepdive",
         "price": cur_p, "ma200": raw["ma200"],
@@ -1688,14 +1707,8 @@ def render_value_screen():
     if timed_out:
         st.caption(f"⚠️ Timed out: {', '.join(timed_out[:10])}")
 
-    # Refresh tech signals
-    with st.spinner("Refreshing technical signals…"):
-        def _refresh(t):
-            try: fetch_ticker_data(t, force_refresh=True)
-            except: pass
-        with ThreadPoolExecutor(max_workers=6) as ex:
-            list(ex.map(_refresh, tickers[:30]))
-
+    # Tech signals — read from session signals_df (written by scanner/deep dive).
+    # We do NOT force-refresh here to avoid triggering reruns in other tabs.
     tech_map = {}
     sdf = get_signals_df()
     if not sdf.empty and "ticker" in sdf.columns:
