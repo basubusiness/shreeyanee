@@ -232,7 +232,12 @@ def load_signals():
         rows = []
         page, page_size = 0, 1000
         while True:
-            res = sb.table("signals").select("*").range(page*page_size, (page+1)*page_size-1).execute()
+            # Only fetch actionable signals — WAIT/AVOID rows not needed for scanner display
+            res = (sb.table("signals")
+                     .select("*")
+                     .in_("action", ["BUY","WATCH","SELL","AVOID"])
+                     .range(page*page_size, (page+1)*page_size-1)
+                     .execute())
             if not res.data:
                 break
             rows.extend(res.data)
@@ -1056,61 +1061,52 @@ PRESETS = {
 }
 
 def build_tickers(preset_key, filters):
+    """
+    Build ticker list entirely from signals_df — no universe fetch needed.
+    Universe is only loaded when filters expander is opened (country/sector dropdowns).
+    """
     preset = PRESETS.get(preset_key, {"type":"ETF"})
     ptype  = preset.get("type","ETF")
-    tickers = []
+    sdf    = get_signals_df()
 
-    sdf = get_signals_df()
+    if sdf.empty:
+        return []
 
-    if ptype in ("ETF","custom"):
-        # Primary: jetf_df (when justetf-scraping is installed)
-        # Secondary: universe ETFs
-        # Fallback: all ETF tickers already in signals.csv — always works on Community Cloud
-        src_df = (get_jetf_df() if not get_jetf_df().empty
-                  else get_universe()[get_universe()["type"]=="ETF"] if not get_universe().empty
-                  else pd.DataFrame())
+    # Start from all signals rows matching the asset type
+    if ptype == "ETF":
+        mask = sdf["type"] == "ETF" if "type" in sdf.columns else pd.Series([True]*len(sdf))
+    elif ptype == "Stock":
+        mask = sdf["type"] == "Stock" if "type" in sdf.columns else pd.Series([True]*len(sdf))
+    else:  # custom
+        mask = pd.Series([True]*len(sdf), index=sdf.index)
 
-        if not src_df.empty:
-            mask = pd.Series([True]*len(src_df), index=src_df.index)
-            if "domicile" in preset and "domicile" in src_df.columns:
-                mask &= src_df["domicile"].isin(preset["domicile"])
-            for col, fkey in [("domicile","domicile"),("dist_policy","dist_policy"),
-                               ("replication","replication"),("strategy","strategy")]:
-                if filters.get(fkey) and col in src_df.columns:
-                    mask &= src_df[col].isin(filters[fkey])
-            if filters.get("min_size",0) > 0 and "fund_size_eur" in src_df.columns:
-                mask &= src_df["fund_size_eur"].fillna(0) >= filters["min_size"]
-            if filters.get("max_ter",2.0) < 2.0 and "ter" in src_df.columns:
-                mask &= src_df["ter"].fillna(99) <= filters["max_ter"]
-            tcol = "ticker" if "ticker" in src_df.columns else src_df.columns[0]
-            tickers += src_df[mask][tcol].dropna().str.upper().tolist()
-        elif not sdf.empty and "ticker" in sdf.columns:
-            # Fallback: use ETF tickers from signals.csv directly
-            etf_col = "type" if "type" in sdf.columns else None
-            if etf_col:
-                tickers += sdf[sdf[etf_col]=="ETF"]["ticker"].dropna().str.upper().tolist()
-            else:
-                tickers += sdf["ticker"].dropna().str.upper().tolist()
+    df = sdf[mask].copy()
 
-    if ptype in ("Stock","custom"):
-        if not get_universe().empty:
-            mask = get_universe()["type"] == "Stock"
-            if "country" in preset and "country" in get_universe().columns:
-                mask &= get_universe()["country"].isin(preset["country"])
-            if filters.get("country") and "country" in get_universe().columns:
-                mask &= get_universe()["country"].isin(filters["country"])
-            if filters.get("sector") and "sector" in get_universe().columns:
-                mask &= get_universe()["sector"].isin(filters["sector"])
-            tickers += get_universe()[mask]["ticker"].dropna().str.upper().tolist()
+    # Preset-level filters (country for stock presets, domicile for ETF presets)
+    if "country" in preset and "country" in df.columns:
+        df = df[df["country"].isin(preset["country"])]
+    if "domicile" in preset and "domicile" in df.columns:
+        df = df[df["domicile"].isin(preset["domicile"])]
 
-    # Filter leveraged/SPAC/warrants
+    # User filter overrides (only applied when filters expander is used)
+    for col, fkey in [("domicile","domicile"),("dist_policy","dist_policy"),
+                      ("replication","replication"),("strategy","strategy"),
+                      ("country","country"),("sector","sector")]:
+        if filters.get(fkey) and col in df.columns:
+            df = df[df[col].isin(filters[fkey])]
+    if filters.get("min_size",0) > 0 and "fund_size_eur" in df.columns:
+        df = df[df["fund_size_eur"].fillna(0) >= filters["min_size"]]
+    if filters.get("max_ter",2.0) < 2.0 and "ter" in df.columns:
+        df = df[df["ter"].fillna(99) <= filters["max_ter"]]
+
     def _is_bad(t):
         t = str(t).strip()
         if len(t) < 2: return True
-        if t[-1] in ('W','U','R') and len(t) >= 4: return True
+        if t[-1] in ("W","U","R") and len(t) >= 4: return True
         return False
-    tickers = [t for t in dict.fromkeys(tickers) if not _is_bad(t)]
-    return tickers[:5000]
+
+    tickers = [t for t in df["ticker"].dropna().str.upper().tolist() if not _is_bad(t)]
+    return list(dict.fromkeys(tickers))
 
 
 
@@ -1177,32 +1173,40 @@ def render_sidebar():
     preset = st.sidebar.selectbox("🎯 Universe preset", list(PRESETS.keys()), index=0)
     ptype  = PRESETS[preset].get("type","ETF")
 
-    # Filters
+    # Filters — all options derived from signals_df (no universe fetch on page load)
     filters = {}
     with st.sidebar.expander("🔧 Optional Filters", expanded=False):
+        _sdf = get_signals_df()  # already loaded — no extra fetch
+
         if ptype == "custom":
             types = st.multiselect("Asset Type", ["ETF","Stock"], default=["ETF"])
             filters["types"] = types
+
         if ptype in ("ETF","custom"):
-            _jdf = get_jetf_df()
-            dom_opts  = sorted(_jdf["domicile"].dropna().unique().tolist()) if not _jdf.empty and "domicile" in _jdf.columns else ["Ireland","Luxembourg","Germany","United States"]
-            dist_opts = sorted(_jdf["dist_policy"].dropna().unique().tolist()) if not _jdf.empty and "dist_policy" in _jdf.columns else ["Accumulating","Distributing"]
-            repl_opts = sorted(_jdf["replication"].dropna().unique().tolist()) if not _jdf.empty and "replication" in _jdf.columns else ["Physical (Full)","Physical (Sampling)","Swap-based"]
+            _etfs = _sdf[_sdf["type"]=="ETF"] if "type" in _sdf.columns else _sdf
+            def _opts(col, fallback):
+                if col in _etfs.columns:
+                    vals = sorted(_etfs[col].dropna().astype(str).unique().tolist())
+                    vals = [v for v in vals if v not in ("","nan","None")]
+                    if vals: return vals
+                return fallback
             st.markdown("**📦 ETF Filters**")
-            filters["domicile"]     = st.multiselect("Domicile",     dom_opts)
-            filters["dist_policy"]  = st.multiselect("Distribution", dist_opts)
-            filters["replication"]  = st.multiselect("Replication",  repl_opts)
-            filters["min_size"]     = st.number_input("Min Size €m", min_value=0, value=0, step=50)
-            filters["max_ter"]      = st.number_input("Max TER %",   min_value=0.0, max_value=5.0, value=2.0, step=0.05)
+            filters["domicile"]    = st.multiselect("Domicile",     _opts("domicile",    ["Ireland","Luxembourg","Germany","United States"]))
+            filters["dist_policy"] = st.multiselect("Distribution", _opts("dist_policy", ["Accumulating","Distributing"]))
+            filters["replication"] = st.multiselect("Replication",  _opts("replication", ["Physical (Full)","Physical (Sampling)","Swap-based"]))
+            filters["min_size"]    = st.number_input("Min Size €m", min_value=0, value=0, step=50)
+            filters["max_ter"]     = st.number_input("Max TER %",   min_value=0.0, max_value=5.0, value=2.0, step=0.05)
+
         if ptype in ("Stock","custom"):
+            _stocks = _sdf[_sdf["type"]=="Stock"] if "type" in _sdf.columns else _sdf
+            def _sopts(col):
+                if col in _stocks.columns:
+                    vals = sorted(_stocks[col].dropna().astype(str).unique().tolist())
+                    return [v for v in vals if v not in ("","nan","None")]
+                return []
             st.markdown("**📈 Stock Filters**")
-            if not get_universe().empty:
-                ctry_opts = sorted(get_universe()[get_universe()["type"]=="Stock"]["country"].dropna().unique().tolist())
-                sect_opts = sorted(get_universe()[get_universe()["type"]=="Stock"]["sector"].dropna().unique().tolist())
-            else:
-                ctry_opts, sect_opts = [], []
-            filters["country"] = st.multiselect("Country", ctry_opts)
-            filters["sector"]  = st.multiselect("Sector",  sect_opts)
+            filters["country"] = st.multiselect("Country", _sopts("country"))
+            filters["sector"]  = st.multiselect("Sector",  _sopts("sector"))
 
     st.sidebar.divider()
 
