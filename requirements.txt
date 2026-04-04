@@ -7,3 +7,4 @@ requests>=2.31.0
 pandas-datareader>=0.10.0
 financedatabase==2.1.1
 fear-greed>=0.1.0
+supabase>=2.0.0
