@@ -1199,9 +1199,10 @@ def render_sidebar():
             types = st.multiselect("Asset Type", ["ETF","Stock"], default=["ETF"])
             filters["types"] = types
         if ptype in ("ETF","custom"):
-            dom_opts  = sorted(get_jetf_df()["domicile"].dropna().unique().tolist()) if not jetf_df.empty and "domicile" in jetf_df.columns else ["Ireland","Luxembourg","Germany","United States"]
-            dist_opts = sorted(get_jetf_df()["dist_policy"].dropna().unique().tolist()) if not jetf_df.empty and "dist_policy" in jetf_df.columns else ["Accumulating","Distributing"]
-            repl_opts = sorted(get_jetf_df()["replication"].dropna().unique().tolist()) if not jetf_df.empty and "replication" in jetf_df.columns else ["Physical (Full)","Physical (Sampling)","Swap-based"]
+            _jdf = get_jetf_df()
+            dom_opts  = sorted(_jdf["domicile"].dropna().unique().tolist()) if not _jdf.empty and "domicile" in _jdf.columns else ["Ireland","Luxembourg","Germany","United States"]
+            dist_opts = sorted(_jdf["dist_policy"].dropna().unique().tolist()) if not _jdf.empty and "dist_policy" in _jdf.columns else ["Accumulating","Distributing"]
+            repl_opts = sorted(_jdf["replication"].dropna().unique().tolist()) if not _jdf.empty and "replication" in _jdf.columns else ["Physical (Full)","Physical (Sampling)","Swap-based"]
             st.markdown("**📦 ETF Filters**")
             filters["domicile"]     = st.multiselect("Domicile",     dom_opts)
             filters["dist_policy"]  = st.multiselect("Distribution", dist_opts)
