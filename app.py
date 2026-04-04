@@ -1421,6 +1421,12 @@ def render_scanner(tickers, budget, vix, fg, rm):
     result_df = st.session_state["scan_results"]
     st.caption(st.session_state.get("scan_status",""))
 
+    # ── Guard: if session has old-format results, clear and ask for rescan
+    if "_core" not in result_df.columns:
+        st.session_state.pop("scan_results", None)
+        st.info("Strategy view updated — click **Run Scan** to reload.")
+        return
+
     # ── Strategy KPI row ─────────────────────────────────────────────
     k1,k2,k3,k4 = st.columns(4)
     k1.metric("🟡 CORE",       int(result_df["_core"].sum()))
