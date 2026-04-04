@@ -1408,25 +1408,49 @@ def build_result_df(sig, budget, fg, rm):
 
 
 def _show_strategy_table(df, label, color, empty_msg):
-    """Render a strategy sub-table with consistent styling."""
+    """Render a strategy sub-table with checkbox Deep Dive and consistent styling."""
     if df.empty:
         st.info(empty_msg)
         return
+
     display = [c for c in df.columns if not c.startswith("_")]
+
+    # Add a Select column for Deep Dive — vectorised, no loop
+    df_edit = df[display].copy()
+    df_edit.insert(0, "🔬", False)   # checkbox column
+
     def _style(val):
         colors = {"BUY":"#0d9488","WATCH":"#0284c7","SELL":"#dc2626","AVOID":"#d97706"}
         if val in colors: return f"color:{colors[val]};font-weight:600;"
         if val in ("A","B"): return "color:#0d9488;font-weight:700;"
+        if str(val).startswith("🟢"): return "color:#0d9488;font-weight:700;"
+        if str(val).startswith("🟡"): return "color:#d97706;font-weight:600;"
+        if str(val).startswith("🔴"): return "color:#dc2626;font-weight:600;"
         if val == "▲": return "color:#0d9488;"
         if val == "▼": return "color:#dc2626;"
         return ""
-    style_cols = [c for c in ["Signal","Grade","MACD"] if c in display]
-    st.dataframe(
-        df[display].style.applymap(_style, subset=style_cols),
+
+    style_cols = [c for c in ["Signal","Grade","MACD","Risk"] if c in display]
+
+    edited = st.data_editor(
+        df_edit,
+        column_config={"🔬": st.column_config.CheckboxColumn("🔬 Dive", help="Tick to Deep Dive", width="small")},
+        disabled=[c for c in df_edit.columns if c != "🔬"],
         use_container_width=True,
-        height=min(500, 45 + len(df)*35),
+        height=min(500, 45 + len(df_edit)*35),
         hide_index=True,
+        key=f"tbl_{label}",
     )
+
+    # Deep Dive trigger — vectorised check, instant
+    selected = edited[edited["🔬"] == True]
+    if not selected.empty:
+        ticker = selected.iloc[0]["Ticker"]
+        if st.button(f"🔬 Deep Dive on {ticker}", type="primary", key=f"dive_{label}_{ticker}"):
+            st.session_state["dd_ticker"] = ticker
+            st.session_state["dd_auto"]   = True
+            st.rerun()
+
     csv = df[display].to_csv(index=False).encode("utf-8")
     st.download_button(f"⬇️ Download {label}", csv,
                        f"{label.lower().replace(' ','_')}.csv", "text/csv",
@@ -1464,19 +1488,8 @@ def render_scanner(tickers, budget, vix, fg, rm):
             st.warning("No signals found.")
             return
         with st.spinner(f"⚡ Classifying {len(sig):,} signals…"):
-            # For CORE (ETF timing): always use full signals regardless of preset
-            # so ETF dip signals show even when a stock preset is selected
-            full_sdf = sdf.copy()
-            etf_sig  = full_sdf[full_sdf.get("type", pd.Series([""] * len(full_sdf))).str.upper() == "ETF"].copy() if "type" in full_sdf.columns else pd.DataFrame()
-            # Classify the preset-filtered signals (stocks or ETFs per preset)
+            # Filters are always respected — classify only what the preset returns
             sig_classified = classify_strategies(sig)
-            # Classify ETFs from full universe separately, merge CORE flag in
-            if not etf_sig.empty:
-                etf_classified = classify_strategies(etf_sig)
-                etf_core = etf_classified[etf_classified["is_core"]].copy()
-                # Remove any ETFs already in sig_classified, add CORE ETFs back
-                non_etf = sig_classified[~sig_classified.get("is_core", pd.Series([False]*len(sig_classified))).values]
-                sig_classified = pd.concat([etf_core, non_etf], ignore_index=True)
             result_df = build_result_df(sig_classified, budget, fg, rm)
             computed = sig["computed_at"].iloc[0] if "computed_at" in sig.columns else "unknown"
             st.session_state["scan_results"] = result_df
@@ -1582,7 +1595,11 @@ def render_scanner(tickers, budget, vix, fg, rm):
             csv = df_core[display].to_csv(index=False).encode("utf-8")
             st.download_button("⬇️ Download CORE signals", csv, "core_signals.csv", "text/csv", key="dl_core")
         else:
-            st.info("No CORE signals found. Run scan with any preset — CORE always loads ETF signals from the full database.")
+            st.info(
+                "No CORE timing signals in the current preset. "
+                "Switch to **All ETFs** or **UCITS ETFs** in the sidebar to see ETF dip opportunities. "
+                "If you're on a stocks preset, CORE signals only appear for any ETFs mixed into that universe."
+            )
 
     with tab_value:
         st.caption("Undervalued quality stocks — mean reversion play. Higher win rate, slower returns.")
@@ -1689,7 +1706,12 @@ def render_deepdive(budget):
     if "dd_ticker" in st.session_state and not ticker_input:
         ticker_input = st.session_state["dd_ticker"]
 
-    if not (analyse_btn or refresh_btn) or not ticker_input:
+    # Auto-trigger from scanner checkbox
+    auto_dive = st.session_state.pop("dd_auto", False)
+    if not ticker_input and "dd_ticker" in st.session_state:
+        ticker_input = st.session_state["dd_ticker"]
+
+    if not (analyse_btn or refresh_btn or auto_dive) or not ticker_input:
         st.info("Enter a ticker or ISIN and click **Analyse**.")
         return
 
