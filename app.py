@@ -811,7 +811,7 @@ def fetch_yf_fundamentals_batch(tickers, max_workers=8, timeout=6):
     return results, timed_out
 
 def _get_fmp_key():
-    return st.secrets.get("FMP_API_KEY","").strip() or ""
+    return os.environ.get("FMP_API_KEY","").strip() or ""
 
 def fetch_fmp_fundamentals(ticker):
     key = _get_fmp_key()
@@ -1108,6 +1108,14 @@ def render_sidebar():
     st.sidebar.markdown(f"**📡 Market Decision Engine** `{APP_VERSION}`")
     st.sidebar.caption(f"deployed {BUILD_TIME}")
 
+    # (2) Refresh button — busts VIX + F&G cache so re-fetch is live
+    if st.sidebar.button("🔄 Refresh indicators", use_container_width=True):
+        store = _get_cache_store()
+        lock  = _get_cache_lock()
+        with lock:
+            store.pop("vix", None)
+            store.pop("fg",  None)
+
     # Live indicators
     vix      = get_live_vix()
     fg, lbl  = get_fg_index()
@@ -1118,6 +1126,13 @@ def render_sidebar():
     c1.metric("VIX", f"{vix:.1f}")
     c2.metric("Fear & Greed", f"{gauge} {fg}")
     st.sidebar.caption(lbl)
+
+    # (1) Validation links
+    st.sidebar.markdown(
+        "[📈 Live VIX](https://finance.yahoo.com/quote/%5EVIX/)  ·  "
+        "[🧠 CNN F&G](https://edition.cnn.com/markets/fear-and-greed)  ·  "
+        "[🌐 Alt.me](https://alternative.me/crypto/fear-and-greed-index/)"
+    )
 
     if rm > 2.5:
         st.sidebar.error(f"🔥 Extreme Fear — {rm:.1f}x")
@@ -1202,101 +1217,70 @@ def render_scanner(tickers, budget, workers, fetch_pe, vix, fg, rm):
 
     sdf = get_signals_df()
 
-    # ── FAST PATH ────────────────────────────────────────────────────
+    # ── PRE-COMPUTED ONLY — no live scan cap ─────────────────────────
     if run_scan:
         st.session_state.pop("scan_results", None)
-        if not sdf.empty:
-            sig = sdf[sdf["ticker"].isin(tickers)].copy()
-            if len(sig) >= 10:
-                with st.spinner(f"⚡ Loading {len(sig)} pre-computed signals…"):
-                    budget_val = budget or 1000
-                    rows = []
-                    for _, r in sig.iterrows():
-                        action = str(r.get("action","WAIT"))
-                        conf   = float(r.get("conf", 0.5) or 0.5)
-                        vol    = float(r.get("vol_pct", 2) or 2)
-                        dm     = float(r.get("dist_ma200", 0) or 0)
-                        rsi_v  = float(r.get("rsi", 50) or 50)
-                        if action == "AVOID":  alloc = "⛔ Skip"
-                        elif action == "WAIT": alloc = "—"
-                        elif action == "WATCH":
-                            alloc = f"👀 €{budget_val*0.25*(0.5+conf):,.0f}"
-                        else:
-                            ctx_s = (40 if fg<35 else 20 if fg<50 else 0)/100
-                            sig_s = min(-dm/20,1)*0.5 + min((50-rsi_v)/50,1)*0.5 if dm<0 else 0
-                            amt   = budget_val*(ctx_s+sig_s)*(0.5+conf)*max(0.5,1-vol/20)*rm
-                            amt   = max(budget_val*0.25, min(amt, budget_val*3))
-                            tier  = "🔥" if amt>=budget_val*1.5 else "⚖️" if amt>=budget_val*0.8 else "🔍"
-                            alloc = f"{tier} €{amt:,.0f}"
-                        pe   = r.get("pe_ratio")
-                        div  = r.get("div_yield")
-                        mcap = r.get("market_cap")
-                        beta = r.get("beta")
-                        dist_display = r.get("dist_ma200") if pd.notna(r.get("dist_ma200")) else r.get("ret_1m")
-                        name, isin = get_name_isin(str(r.get("ticker","")))
-                        rows.append({
-                            "Ticker":  r["ticker"],
-                            "Name":    r.get("name", name) or name,
-                            "Price":   round(float(r["price"]),2) if pd.notna(r.get("price")) else "—",
-                            "Dist%":   round(float(dist_display),2) if dist_display is not None and pd.notna(dist_display) else 0,
-                            "52W%":    r.get("dist_52w",0) if pd.notna(r.get("dist_52w")) else "—",
-                            "RSI":     round(float(r.get("rsi",50)),1) if pd.notna(r.get("rsi")) else "—",
-                            "MACD":    ("▲ Bull" if r.get("macd_bull",0) else "▼ Bear") if pd.notna(r.get("macd_bull")) else "—",
-                            "Vol%":    r.get("vol_pct",0) if pd.notna(r.get("vol_pct")) else "—",
-                            "Action":  action,
-                            "Score":   round(float(r.get("score",0) or 0),3),
-                            "Knife":   "⚠️" if r.get("is_knife",0) and not r.get("reversal",0) else "",
-                            "Alloc":   alloc,
-                            "PE":      f"{pe:.1f}" if pe and str(pe) != 'nan' else "—",
-                            "Beta":    f"{beta:.2f}" if beta and str(beta) != 'nan' else "—",
-                            "Div%":    f"{div*100:.1f}%" if div and str(div) != 'nan' else "—",
-                            "MCap":    f"${mcap/1e9:.1f}B" if mcap and str(mcap) != 'nan' else "—",
-                            "VGrade":  str(r.get("value_grade","")) if pd.notna(r.get("value_grade")) and str(r.get("value_grade","")) not in ("","nan","None") else "—",
-                            "Source":  r.get("data_source",""),
-                        })
-                    result_df = pd.DataFrame(rows)
-                    action_order = {"BUY":0,"WATCH":1,"SELL":2,"AVOID":3,"WAIT":4}
-                    result_df["_an"] = result_df["Action"].map(action_order).fillna(5)
-                    result_df = result_df.sort_values(["_an","Score"],ascending=[True,False]).drop(columns=["_an"]).reset_index(drop=True)
-                    result_df.insert(0,"#",result_df.index+1)
-                    computed = sig["computed_at"].iloc[0] if "computed_at" in sig.columns else "unknown"
-                    st.session_state["scan_results"] = result_df
-                    st.session_state["scan_status"]  = f"⚡ {len(result_df)} pre-computed · updated: {computed}"
-                    st.rerun()
-
-        # ── LIVE SCAN ─────────────────────────────────────────────────
-        MAX = 500
-        scan_tickers = tickers[:MAX]
-        progress_bar = st.progress(0, text="Starting live scan…")
-        results = []
-        isin_map = {}
-        if not jetf_df.empty and "ticker" in jetf_df.columns and "isin" in jetf_df.columns:
-            isin_map = dict(zip(jetf_df["ticker"], jetf_df["isin"].fillna("")))
-
-        done, total = 0, len(scan_tickers)
-        with ThreadPoolExecutor(max_workers=int(workers)) as ex:
-            futs = {ex.submit(analyse_ticker, t, rm, isin_map.get(t,"")): t for t in scan_tickers}
-            for fut in as_completed(futs):
-                try:
-                    r = fut.result()
-                    if r:
-                        results.append(r)
-                except Exception:
-                    pass
-                done += 1
-                progress_bar.progress(done/total, text=f"Scanning… {done}/{total} ({len(results)} signals)")
-
-        progress_bar.empty()
-        if results:
-            result_df = pd.DataFrame(results)
+        if sdf.empty:
+            st.warning("No signals.csv loaded. Commit signals.csv to your repo and redeploy.")
+            return
+        sig = sdf[sdf["ticker"].isin(tickers)].copy()
+        if len(sig) == 0:
+            st.warning("No pre-computed signals match the current preset/filters.")
+            return
+        with st.spinner(f"⚡ Loading {len(sig)} pre-computed signals…"):
+            budget_val = budget or 1000
+            rows = []
+            for _, r in sig.iterrows():
+                action = str(r.get("action","WAIT"))
+                conf   = float(r.get("conf", 0.5) or 0.5)
+                vol    = float(r.get("vol_pct", 2) or 2)
+                dm     = float(r.get("dist_ma200", 0) or 0)
+                rsi_v  = float(r.get("rsi", 50) or 50)
+                if action == "AVOID":  alloc = "⛔ Skip"
+                elif action == "WAIT": alloc = "—"
+                elif action == "WATCH":
+                    alloc = f"👀 €{budget_val*0.25*(0.5+conf):,.0f}"
+                else:
+                    ctx_s = (40 if fg<35 else 20 if fg<50 else 0)/100
+                    sig_s = min(-dm/20,1)*0.5 + min((50-rsi_v)/50,1)*0.5 if dm<0 else 0
+                    amt   = budget_val*(ctx_s+sig_s)*(0.5+conf)*max(0.5,1-vol/20)*rm
+                    amt   = max(budget_val*0.25, min(amt, budget_val*3))
+                    tier  = "🔥" if amt>=budget_val*1.5 else "⚖️" if amt>=budget_val*0.8 else "🔍"
+                    alloc = f"{tier} €{amt:,.0f}"
+                pe   = r.get("pe_ratio")
+                div  = r.get("div_yield")
+                mcap = r.get("market_cap")
+                beta = r.get("beta")
+                dist_display = r.get("dist_ma200") if pd.notna(r.get("dist_ma200")) else r.get("ret_1m")
+                name, isin = get_name_isin(str(r.get("ticker","")))
+                rows.append({
+                    "Ticker":  r["ticker"],
+                    "Name":    r.get("name", name) or name,
+                    "Price":   round(float(r["price"]),2) if pd.notna(r.get("price")) else "—",
+                    "Dist%":   round(float(dist_display),2) if dist_display is not None and pd.notna(dist_display) else 0,
+                    "52W%":    r.get("dist_52w",0) if pd.notna(r.get("dist_52w")) else "—",
+                    "RSI":     round(float(r.get("rsi",50)),1) if pd.notna(r.get("rsi")) else "—",
+                    "MACD":    ("▲ Bull" if r.get("macd_bull",0) else "▼ Bear") if pd.notna(r.get("macd_bull")) else "—",
+                    "Vol%":    r.get("vol_pct",0) if pd.notna(r.get("vol_pct")) else "—",
+                    "Action":  action,
+                    "Score":   round(float(r.get("score",0) or 0),3),
+                    "Knife":   "⚠️" if r.get("is_knife",0) and not r.get("reversal",0) else "",
+                    "Alloc":   alloc,
+                    "PE":      f"{pe:.1f}" if pe and str(pe) != 'nan' else "—",
+                    "Beta":    f"{beta:.2f}" if beta and str(beta) != 'nan' else "—",
+                    "Div%":    f"{div*100:.1f}%" if div and str(div) != 'nan' else "—",
+                    "MCap":    f"${mcap/1e9:.1f}B" if mcap and str(mcap) != 'nan' else "—",
+                    "VGrade":  str(r.get("value_grade","")) if pd.notna(r.get("value_grade")) and str(r.get("value_grade","")) not in ("","nan","None") else "—",
+                    "Source":  r.get("data_source",""),
+                })
+            result_df = pd.DataFrame(rows)
             action_order = {"BUY":0,"WATCH":1,"SELL":2,"AVOID":3,"WAIT":4}
             result_df["_an"] = result_df["Action"].map(action_order).fillna(5)
             result_df = result_df.sort_values(["_an","Score"],ascending=[True,False]).drop(columns=["_an"]).reset_index(drop=True)
             result_df.insert(0,"#",result_df.index+1)
+            computed = sig["computed_at"].iloc[0] if "computed_at" in sig.columns else "unknown"
             st.session_state["scan_results"] = result_df
-            st.session_state["scan_status"]  = f"✅ Live scan: {len(result_df)} signals from {total} tickers"
-        else:
-            st.warning("No signals found. Try a different preset or wider filters.")
+            st.session_state["scan_status"]  = f"⚡ {len(result_df):,} pre-computed signals · updated: {computed}"
         st.rerun()
 
     # ── Display results ───────────────────────────────────────────────
@@ -1381,20 +1365,22 @@ def render_scanner(tickers, budget, workers, fetch_pe, vix, fg, rm):
 def render_deepdive(budget):
     st.subheader("🔬 Deep Dive")
 
-    c1, c2, c3 = st.columns([4, 1, 1])
+    c1, c2, c3, c4 = st.columns([4, 1, 1, 1])
     ticker_input = c1.text_input("Ticker or ISIN", placeholder="e.g. VWRA or IE00B3RBWM25")
     budget_dd    = c2.number_input("Budget (EUR)", min_value=100, value=budget, step=100)
     analyse_btn  = c3.button("🔍 Analyse", type="primary")
+    refresh_btn  = c4.button("🔄 Refresh", help="Force live re-fetch, busting all caches for this ticker")
 
     # Allow clicking from scanner
     if "dd_ticker" in st.session_state and not ticker_input:
         ticker_input = st.session_state["dd_ticker"]
 
-    if not analyse_btn or not ticker_input:
+    if not (analyse_btn or refresh_btn) or not ticker_input:
         st.info("Enter a ticker or ISIN and click **Analyse**.")
         return
 
-    ticker = ticker_input.strip().upper()
+    ticker       = ticker_input.strip().upper()
+    force_refr   = refresh_btn  # always force-refresh on Refresh button
 
     # ISIN → ticker lookup
     isin = None
@@ -1406,8 +1392,8 @@ def render_deepdive(budget):
             if not match.empty:
                 ticker = match.iloc[0]["ticker"]
 
-    with st.spinner(f"Fetching {ticker}…"):
-        raw = fetch_ticker_data(ticker, isin=isin, force_refresh=True)
+    with st.spinner(f"{'🔄 Force-refreshing' if force_refr else 'Fetching'} {ticker}…"):
+        raw = fetch_ticker_data(ticker, isin=isin, force_refresh=True)  # always live in Deep Dive
 
     if raw is None:
         st.error(f"Could not fetch data for **{ticker}**. Check the ticker and try again.")
@@ -1668,13 +1654,14 @@ def render_value_screen():
         placeholder="AAPL, MSFT, GOOGL, META, AMZN, NVDA …",
     )
 
-    c1,c2,c3 = st.columns([2,2,2])
+    c1,c2,c3,c4 = st.columns([2,2,1,1])
     min_score   = c1.number_input("Min Value Score", min_value=0, max_value=100, value=20, step=5)
     tech_filter = c2.selectbox("Require tech signal", ["Any","BUY only","BUY or WATCH"])
-    run_vs      = c3.button("🔍 Run Value Screen", type="primary")
+    run_vs      = c3.button("🔍 Run", type="primary")
+    refresh_vs  = c4.button("🔄 Refresh Live", help="Bust fundamentals + tech cache for all listed tickers and re-run")
 
-    if not run_vs:
-        st.info("Enter tickers and click **Run Value Screen**.")
+    if not run_vs and not refresh_vs:
+        st.info("Enter tickers and click **Run**.")
         return
 
     tickers = [t.strip().upper() for t in tickers_raw.replace("\n"," ").split(",") if t.strip()]
@@ -1682,6 +1669,18 @@ def render_value_screen():
     if not tickers:
         st.warning("No tickers entered.")
         return
+
+    # Refresh Live: bust all cached fundamentals + tech for listed tickers
+    if refresh_vs:
+        store = _get_cache_store()
+        lock  = _get_cache_lock()
+        with lock:
+            for t in tickers:
+                for k in list(store.keys()):
+                    if k in (f"tick_{t}", f"yfund_{t}", f"conv_{t}") or \
+                       (k.startswith("fmp_") and t in k):
+                        store.pop(k, None)
+        st.toast(f"🔄 Cache busted for {len(tickers)} tickers — re-fetching…")
 
     with st.spinner(f"Fetching fundamentals for {len(tickers)} tickers…"):
         fund_batch, timed_out = fetch_yf_fundamentals_batch(tickers, max_workers=8, timeout=5)
