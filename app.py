@@ -1229,8 +1229,8 @@ def classify_strategies(s):
     rsi   = pd.to_numeric(s.get("rsi"),         errors="coerce").fillna(50)
     mb    = pd.to_numeric(s.get("macd_bull",0), errors="coerce").fillna(0)
     vg    = s.get("value_grade","—").fillna("—").astype(str) if "value_grade" in s.columns else pd.Series(["—"]*len(s))
-    roe   = pd.to_numeric(s.get("roe"),         errors="coerce")
-    rev_g = pd.to_numeric(s.get("rev_growth"),  errors="coerce")
+    roe   = pd.to_numeric(s.get("roe",   pd.Series([np.nan]*len(s))), errors="coerce")
+    rev_g = pd.to_numeric(s.get("rev_growth", pd.Series([np.nan]*len(s))), errors="coerce")
     atype = s.get("type","").fillna("").astype(str) if "type" in s.columns else pd.Series([""]*len(s))
     action= s.get("action","WAIT").fillna("WAIT").astype(str)
 
@@ -1312,7 +1312,7 @@ def build_result_df(sig, budget, fg, rm):
 
     # Key driver label
     vg  = s.get("value_grade","—").fillna("—").astype(str) if "value_grade" in s.columns else pd.Series(["—"]*len(s))
-    rg  = pd.to_numeric(s.get("rev_growth"), errors="coerce")
+    rg  = pd.to_numeric(s.get("rev_growth", pd.Series([np.nan]*len(s))), errors="coerce")
     rg_str = (rg*100).round(0).astype("Int64").astype(str).replace("<NA>","—") + "% rev"
     driver = np.where(s.get("is_core",  False), "ETF dip opportunity",
              np.where(s.get("is_value", False), "Oversold + Grade " + vg.values,
