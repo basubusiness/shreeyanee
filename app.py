@@ -1449,6 +1449,17 @@ def render_scanner(tickers, budget, vix, fg, rm):
 
     with tab_core:
         st.caption("ETF timing — accumulate on dips, trim on highs. Capital preservation + compounding.")
+        with st.expander("ℹ️ How does this work?", expanded=False):
+            st.markdown(
+                "**What this tab shows:** ETFs that have dropped significantly from their long-term average and show early recovery signs.\n\n"
+                "**Why ETFs?** They track hundreds of stocks so a dip is usually a market overreaction, not a business failure.\n\n"
+                "**To qualify:** Price 5%+ below 200-day average · RSI under 48 · MACD turning bullish.\n\n"
+                "**Dist%** = how far below the 200-day average (more negative = bigger dip). "
+                "**RSI** = 0–100 oversold meter, below 30 = very oversold. "
+                "**MACD ▲** = momentum turning positive. "
+                "**Alloc** = suggested amount from your monthly budget.\n\n"
+                "**What to do:** Use these to decide *when* to top up existing ETF positions, not *whether* to own them."
+            )
         df_core = result_df[result_df["_core"]].sort_values("Score", ascending=False).reset_index(drop=True)
         df_core.insert(0,"#",range(1,len(df_core)+1))
         _show_strategy_table(df_core, "CORE ETFs", "#f59e0b",
@@ -1456,6 +1467,15 @@ def render_scanner(tickers, budget, vix, fg, rm):
 
     with tab_value:
         st.caption("Undervalued quality stocks — mean reversion play. Higher win rate, slower returns.")
+        with st.expander("ℹ️ How does this work?", expanded=False):
+            st.markdown(
+                "**What this tab shows:** Good quality companies whose stock price has temporarily fallen — a sale on a brand you trust.\n\n"
+                "**The idea:** Strong businesses recover from dips. If fundamentals are solid but price is down, that's often opportunity.\n\n"
+                "**To qualify (ALL must pass):** 10%+ below 200-day average · RSI under 48 · MACD bullish · Grade A or B · ROE above 10% · Revenue growing.\n\n"
+                "**Grade** = our score based on PE, P/B, Free Cash Flow, Return on Equity, Debt, and Revenue growth. A = top quality, D = weak or expensive.\n\n"
+                "**RevGr%** = how fast revenue is growing year-on-year. **Driver** = the main reason this appeared.\n\n"
+                "**What to do:** Medium-term plays (6–18 months). Price recovers toward fair value as the market recognises business quality."
+            )
         df_val = result_df[result_df["_value"]].sort_values("Score", ascending=False).reset_index(drop=True)
         df_val.insert(0,"#",range(1,len(df_val)+1))
         _show_strategy_table(df_val, "VALUE Stocks", "#0284c7",
@@ -1463,6 +1483,15 @@ def render_scanner(tickers, budget, vix, fg, rm):
 
     with tab_mom:
         st.caption("Momentum plays — buy strength, ride the trend. Strong revenue growth + technical breakout.")
+        with st.expander("ℹ️ How does this work?", expanded=False):
+            st.markdown(
+                "**What this tab shows:** Companies already moving — strong revenue growth AND the stock price confirms it. We buy strength, not weakness.\n\n"
+                "**The idea:** When a business is genuinely growing fast and the market recognises it, there's often more upside ahead.\n\n"
+                "**To qualify (ALL must pass):** Price near or above 200-day average · RSI 50–72 (strong but not overheated) · MACD bullish · Revenue growing 20%+ per year.\n\n"
+                "**Key difference from Value:** Value buys cheap things that should recover. Momentum buys strong things that should keep running. "
+                "These use *opposite* signals — a stock here would likely fail the Value screen.\n\n"
+                "**Risk:** Momentum can reverse sharply. These need tighter monitoring than Value picks."
+            )
         df_mom = result_df[result_df["_momentum"]].sort_values("Score", ascending=False).reset_index(drop=True)
         df_mom.insert(0,"#",range(1,len(df_mom)+1))
         _show_strategy_table(df_mom, "MOMENTUM Stocks", "#dc2626",
@@ -1470,6 +1499,17 @@ def render_scanner(tickers, budget, vix, fg, rm):
 
     with tab_dh:
         st.caption("Dark horses — beaten down but growing fast. Lower win rate, high upside potential.")
+        with st.expander("ℹ️ How does this work?", expanded=False):
+            st.markdown(
+                "**What this tab shows:** Companies the market has punished heavily, but whose business is still growing fast. "
+                "The market is wrong (or early) — and you're trying to get in before it figures that out.\n\n"
+                "**To qualify (ALL must pass):** 15%+ below 200-day average · RSI 28–48 (oversold but recovering) · "
+                "MACD turning bullish · Revenue growing 15%+ · NOT already Grade A/B (those go to Value instead).\n\n"
+                "**Why not Grade A/B?** Grade A/B beaten-down stocks go to the VALUE tab. Dark Horses are riskier — "
+                "the financials aren't as clean, but the growth story may be real. Higher risk, higher potential reward.\n\n"
+                "**Be honest about the risk:** Most dark horses don't come good. Size positions smaller and diversify across several. "
+                "**RevGr%** is the key column — if revenue isn't growing, it's not a dark horse, it's just a broken stock."
+            )
         df_dh = result_df[result_df["_darkhorse"]].sort_values("Score", ascending=False).reset_index(drop=True)
         df_dh.insert(0,"#",range(1,len(df_dh)+1))
         _show_strategy_table(df_dh, "DARK HORSE Stocks", "#7c3aed",
@@ -1477,6 +1517,15 @@ def render_scanner(tickers, budget, vix, fg, rm):
 
     with tab_live:
         st.caption("Top picks interleaved across all strategies — one actionable view.")
+        with st.expander("ℹ️ How does this work?", expanded=False):
+            st.markdown(
+                "**What this tab shows:** The best picks from all four strategies in one list — so you don't need to read four tabs.\n\n"
+                "**How it's built:** Top 10 from each strategy, interleaved — one CORE, one VALUE, one MOMENTUM, one DARK HORSE, repeat.\n\n"
+                "**Strategy column:** 🟡 CORE = ETF dip (lowest risk) · 🔵 VALUE = quality stock on sale (medium risk) · "
+                "🔴 MOMENTUM = growing fast, price confirming it (higher risk) · ⚡ DARK HORSE = growing fast, price hasn't caught up (highest risk, highest upside).\n\n"
+                "**How to use it:** Look at the Strategy column first. Pick the strategies that match your current risk appetite and focus on those rows. "
+                "Don't try to act on everything. Always do a Deep Dive before committing capital."
+            )
         # Interleave: top N from each strategy, round-robin
         N = 10
         frames = []
@@ -1702,6 +1751,53 @@ def render_deepdive(budget):
         st.markdown(f"**Conviction:** {conv_grade}")
         if conv_labels:
             st.caption(" · ".join(conv_labels))
+
+    # ── Plain-English signal explanation ─────────────────────────────
+    with st.expander("🧠 Why is the system saying this? (plain English)", expanded=False):
+        reasons = []
+        if dist_ma < -20:
+            reasons.append(f"📉 **Price is {abs(dist_ma):.0f}% below its long-term average** — a significant dip. Assets this far below their 200-day average tend to mean-revert upward over time.")
+        elif dist_ma < -5:
+            reasons.append(f"📉 **Price is {abs(dist_ma):.0f}% below its long-term average** — a moderate pullback that may represent a better-than-average entry point.")
+        elif dist_ma > 10:
+            reasons.append(f"📈 **Price is {dist_ma:.0f}% above its long-term average** — running hot. This is why the system may flag SELL or TRIM.")
+        if rsi_val < 30:
+            reasons.append(f"📊 **RSI is {rsi_val:.0f} — deeply oversold.** When RSI drops this low, sellers have often exhausted themselves and a bounce becomes more likely.")
+        elif rsi_val < 45:
+            reasons.append(f"📊 **RSI is {rsi_val:.0f} — oversold territory.** More sellers than buyers recently, which often precedes a recovery.")
+        elif rsi_val > 70:
+            reasons.append(f"📊 **RSI is {rsi_val:.0f} — overbought.** The price may be getting ahead of itself.")
+        if macd_bull:
+            reasons.append("📈 **MACD is bullish** — short-term momentum has crossed above the signal line. Think of this as the selling pressure easing indicator turning green.")
+        else:
+            reasons.append("📉 **MACD is bearish** — momentum is still to the downside. Sellers appear to still be in control.")
+        if ma200_steep:
+            reasons.append(f"⚠️ **The 200-day average itself is falling steeply** — even if the price bounces, you'd be buying into a declining long-term trend. The system has downgraded the signal because of this.")
+        elif ma200_trend == "rising":
+            reasons.append("✅ **The 200-day average is rising** — the long-term trend is healthy. A dip into a rising trend is one of the best possible setups.")
+        if value_available:
+            if value_grade == "A":
+                reasons.append(f"🏆 **Business quality: Grade A ({value_score}/100)** — scores well on PE, cash flow, debt, and profitability. The dip looks like a market overreaction rather than a business problem.")
+            elif value_grade == "B":
+                reasons.append(f"✅ **Business quality: Grade B ({value_score}/100)** — solid fundamentals. A well-run business at a reasonable price.")
+            elif value_grade == "D":
+                reasons.append(f"⚠️ **Business quality: Grade D ({value_score}/100)** — weak fundamentals or expensive valuation. Be cautious even if the chart looks interesting.")
+        if conv_labels:
+            reasons.append(f"👥 **External signals:** {' · '.join(conv_labels)} — these are analyst ratings, short interest, insider activity, and earnings history.")
+        if is_knife and not reversal:
+            reasons.append("🔪 **Falling knife warning** — price is dropping fast with RSI still declining. The system says AVOID until MACD turns and RSI stabilises.")
+        elif reversal:
+            reasons.append("✅ **Reversal confirmed** — was a falling knife but MACD has turned bullish and RSI is rising. The worst may be over.")
+        fg_now = get_fg_index()[0]
+        if fg_now < 25:
+            reasons.append(f"🔴 **Fear & Greed is {fg_now} (Extreme Fear)** — the whole market is fearful. Historically, extreme fear is when the best long-term entries happen.")
+        elif fg_now > 75:
+            reasons.append(f"💚 **Fear & Greed is {fg_now} (Extreme Greed)** — the market is euphoric. The system is more conservative with buy signals in this environment.")
+        if not reasons:
+            reasons.append("Not enough data to generate an explanation for this signal.")
+        for r in reasons:
+            st.markdown(f"- {r}")
+        st.caption("This explanation is generated automatically from the same signals the system uses. It is not financial advice.")
 
     # ── Charts ────────────────────────────────────────────────────────
     fig_price = go.Figure()
