@@ -67,6 +67,8 @@ html, body, [class*="css"] {
 /* Hide Streamlit chrome */
 #MainMenu, footer, header { visibility: hidden; }
 .block-container { padding-top: 1rem !important; }
+/* Always show sidebar collapse/expand toggle */
+[data-testid="collapsedControl"] { display: flex !important; }
 
 /* Metric cards */
 [data-testid="metric-container"] {
@@ -1212,6 +1214,163 @@ def render_sidebar():
 
 
 # ───────────────────────────────────────────────────────────────────
+# STRATEGY CLASSIFIER
+# ───────────────────────────────────────────────────────────────────
+
+def classify_strategies(s):
+    """
+    Tag each row with one or more strategy flags.
+    Returns DataFrame with added boolean columns:
+      is_core, is_value, is_momentum, is_darkhorse
+    All vectorised — no Python loops.
+    """
+    # Numeric columns with safe fallbacks
+    dm    = pd.to_numeric(s.get("dist_ma200"),  errors="coerce").fillna(0)
+    rsi   = pd.to_numeric(s.get("rsi"),         errors="coerce").fillna(50)
+    mb    = pd.to_numeric(s.get("macd_bull",0), errors="coerce").fillna(0)
+    vg    = s.get("value_grade","—").fillna("—").astype(str) if "value_grade" in s.columns else pd.Series(["—"]*len(s))
+    roe   = pd.to_numeric(s.get("roe"),         errors="coerce")
+    rev_g = pd.to_numeric(s.get("rev_growth"),  errors="coerce")
+    atype = s.get("type","").fillna("").astype(str) if "type" in s.columns else pd.Series([""]*len(s))
+    action= s.get("action","WAIT").fillna("WAIT").astype(str)
+
+    # 🟡 CORE — ETFs with a dip signal (timing plays)
+    is_etf  = atype.str.upper() == "ETF"
+    is_core = is_etf & action.isin(["BUY","WATCH"]) & (dm < -5)
+
+    # 🔵 VALUE — stocks: oversold + quality fundamentals
+    is_stock = ~is_etf
+    grade_ok = vg.isin(["A","B"])
+    roe_ok   = roe.isna() | (roe > 0.10)   # >10% ROE or no data (graceful)
+    rev_ok   = rev_g.isna() | (rev_g > 0)  # positive revenue growth or no data
+    is_value = (is_stock
+                & (dm < -10)
+                & (rsi < 48)
+                & (mb > 0)
+                & grade_ok
+                & roe_ok
+                & rev_ok
+                & action.isin(["BUY","WATCH"]))
+
+    # 🔴 MOMENTUM — stocks: running with strong growth
+    rev_high = rev_g.isna() | (rev_g > 0.20)   # >20% rev growth or no data
+    is_momentum = (is_stock
+                   & (dm > -5)          # near or above MA200
+                   & (rsi >= 50) & (rsi <= 72)
+                   & (mb > 0)
+                   & rev_high
+                   & action.isin(["BUY","WATCH","SELL"]))
+
+    # ⚡ DARK HORSE — stocks: beaten down but high growth potential
+    # Opposite of momentum — price weak but business strong
+    rev_pos  = rev_g.isna() | (rev_g > 0.15)   # >15% rev growth or no data
+    rsi_rec  = (rsi >= 28) & (rsi < 48)         # oversold but recovering
+    is_darkhorse = (is_stock
+                    & (dm < -15)         # significantly below MA200
+                    & rsi_rec
+                    & (mb > 0)           # MACD turning
+                    & rev_pos
+                    & ~grade_ok          # NOT already value-grade A/B — true dark horses
+                    & action.isin(["BUY","WATCH"]))
+
+    # De-duplicate: if stock qualifies for both value and darkhorse → value wins
+    is_darkhorse = is_darkhorse & ~is_value
+
+    s = s.copy()
+    s["is_core"]      = is_core.values
+    s["is_value"]     = is_value.values
+    s["is_momentum"]  = is_momentum.values
+    s["is_darkhorse"] = is_darkhorse.values
+    return s
+
+
+def build_result_df(sig, budget, fg, rm):
+    """Vectorised result DataFrame builder."""
+    s = sig.copy()
+    s["action"]     = s["action"].fillna("WAIT").astype(str)
+    s["conf"]       = pd.to_numeric(s.get("conf"),      errors="coerce").fillna(0.5)
+    s["vol_pct"]    = pd.to_numeric(s.get("vol_pct"),   errors="coerce").fillna(2.0)
+    s["dist_ma200"] = pd.to_numeric(s.get("dist_ma200"),errors="coerce").fillna(0.0)
+    s["rsi"]        = pd.to_numeric(s.get("rsi"),       errors="coerce").fillna(50.0)
+    s["score"]      = pd.to_numeric(s.get("score"),     errors="coerce").fillna(0.0)
+
+    budget_val = budget or 1000
+    ctx_s = (40 if fg < 35 else 20 if fg < 50 else 0) / 100
+    dm    = s["dist_ma200"]
+    rsi_v = s["rsi"]
+    conf  = s["conf"]
+    vol   = s["vol_pct"]
+    sig_s = (np.minimum(-dm/20, 1)*0.5 + np.minimum((50-rsi_v)/50, 1)*0.5).where(dm < 0, 0)
+    amt   = (budget_val*(ctx_s+sig_s)*(0.5+conf)*np.maximum(0.5,1-vol/20)*rm
+             ).clip(budget_val*0.25, budget_val*3)
+    tier  = np.where(amt>=budget_val*1.5,"🔥",np.where(amt>=budget_val*0.8,"⚖️","🔍"))
+    alloc_buy   = tier + " €" + amt.round(0).astype(int).astype(str)
+    alloc_watch = "👀 €" + (budget_val*0.25*(0.5+conf)).round(0).astype(int).astype(str)
+    s["Alloc"] = np.where(s["action"]=="AVOID","⛔ Skip",
+                 np.where(s["action"]=="WAIT","—",
+                 np.where(s["action"]=="WATCH",alloc_watch,alloc_buy)))
+
+    # Key driver label
+    vg  = s.get("value_grade","—").fillna("—").astype(str) if "value_grade" in s.columns else pd.Series(["—"]*len(s))
+    rg  = pd.to_numeric(s.get("rev_growth"), errors="coerce")
+    rg_str = (rg*100).round(0).astype("Int64").astype(str).replace("<NA>","—") + "% rev"
+    driver = np.where(s.get("is_core",  False), "ETF dip opportunity",
+             np.where(s.get("is_value", False), "Oversold + Grade " + vg.values,
+             np.where(s.get("is_momentum",False), "Momentum + " + rg_str.values,
+             np.where(s.get("is_darkhorse",False), "Dark horse + " + rg_str.values,
+             "—"))))
+
+    result_df = pd.DataFrame({
+        "Ticker":   s["ticker"],
+        "Name":     s["name"].fillna("") if "name" in s.columns else "",
+        "Signal":   s["action"],
+        "Score":    s["score"].round(3),
+        "Price":    pd.to_numeric(s.get("price"),    errors="coerce").round(2),
+        "Dist%":    dm.round(2).fillna(0),
+        "RSI":      s["rsi"].round(1),
+        "MACD":     np.where(pd.to_numeric(s.get("macd_bull",0),errors="coerce").fillna(0)>0,"▲","▼"),
+        "Grade":    vg.values,
+        "RevGr%":   (rg*100).round(1).astype(str).replace("nan","—") if rg.notna().any() else "—",
+        "Alloc":    s["Alloc"],
+        "Driver":   driver,
+        "Knife":    np.where((pd.to_numeric(s.get("is_knife",0),errors="coerce").fillna(0)>0)&
+                             (pd.to_numeric(s.get("reversal",0),errors="coerce").fillna(0)==0),"⚠️",""),
+        # strategy flags (hidden, used for filtering)
+        "_core":      s.get("is_core",      pd.Series([False]*len(s))).values,
+        "_value":     s.get("is_value",     pd.Series([False]*len(s))).values,
+        "_momentum":  s.get("is_momentum",  pd.Series([False]*len(s))).values,
+        "_darkhorse": s.get("is_darkhorse", pd.Series([False]*len(s))).values,
+    })
+    return result_df
+
+
+def _show_strategy_table(df, label, color, empty_msg):
+    """Render a strategy sub-table with consistent styling."""
+    if df.empty:
+        st.info(empty_msg)
+        return
+    display = [c for c in df.columns if not c.startswith("_")]
+    def _style(val):
+        colors = {"BUY":"#0d9488","WATCH":"#0284c7","SELL":"#dc2626","AVOID":"#d97706"}
+        if val in colors: return f"color:{colors[val]};font-weight:600;"
+        if val in ("A","B"): return "color:#0d9488;font-weight:700;"
+        if val == "▲": return "color:#0d9488;"
+        if val == "▼": return "color:#dc2626;"
+        return ""
+    style_cols = [c for c in ["Signal","Grade","MACD"] if c in display]
+    st.dataframe(
+        df[display].style.applymap(_style, subset=style_cols),
+        use_container_width=True,
+        height=min(500, 45 + len(df)*35),
+        hide_index=True,
+    )
+    csv = df[display].to_csv(index=False).encode("utf-8")
+    st.download_button(f"⬇️ Download {label}", csv,
+                       f"{label.lower().replace(' ','_')}.csv", "text/csv",
+                       key=f"dl_{label}")
+
+
+# ───────────────────────────────────────────────────────────────────
 # TAB 1 — MARKET SCANNER
 # ───────────────────────────────────────────────────────────────────
 
@@ -1229,154 +1388,106 @@ def render_scanner(tickers, budget, vix, fg, rm):
 
     sdf = get_signals_df()
 
-    # ── PRE-COMPUTED ONLY — no live scan cap ─────────────────────────
     if run_scan:
         st.session_state.pop("scan_results", None)
         if sdf.empty:
-            st.warning("No signals.csv loaded. Commit signals.csv to your repo and redeploy.")
+            st.warning("No signals loaded from Supabase.")
             return
         sig = sdf[sdf["ticker"].isin(tickers)].copy() if tickers else sdf.copy()
         if len(sig) == 0 and not sdf.empty:
-            # Last resort: show all signals regardless of preset filter
             sig = sdf.copy()
-            st.caption("⚠️ Universe filter produced no matches — showing all signals.csv tickers.")
+            st.caption("⚠️ No preset filter matches — showing all signals.")
         if len(sig) == 0:
-            st.warning("No pre-computed signals found. Ensure signals.csv is committed to the repo.")
+            st.warning("No signals found.")
             return
-        with st.spinner(f"⚡ Building results for {len(sig):,} signals…"):
-            budget_val = budget or 1000
-            s = sig.copy()
-
-            # Vectorised column construction — no Python loop
-            s["action"]   = s["action"].fillna("WAIT").astype(str)
-            s["conf"]     = pd.to_numeric(s.get("conf"),    errors="coerce").fillna(0.5)
-            s["vol_pct"]  = pd.to_numeric(s.get("vol_pct"), errors="coerce").fillna(2.0)
-            s["dist_ma200"] = pd.to_numeric(s.get("dist_ma200"), errors="coerce").fillna(0.0)
-            s["rsi"]      = pd.to_numeric(s.get("rsi"),     errors="coerce").fillna(50.0)
-            s["score"]    = pd.to_numeric(s.get("score"),   errors="coerce").fillna(0.0)
-
-            # Allocation — vectorised
-            ctx_s = (40 if fg < 35 else 20 if fg < 50 else 0) / 100
-            dm    = s["dist_ma200"]
-            rsi_v = s["rsi"]
-            conf  = s["conf"]
-            vol   = s["vol_pct"]
-            sig_s = (np.minimum(-dm/20, 1)*0.5 + np.minimum((50-rsi_v)/50, 1)*0.5).where(dm < 0, 0)
-            amt   = (budget_val * (ctx_s + sig_s) * (0.5 + conf)
-                     * np.maximum(0.5, 1 - vol/20) * rm).clip(budget_val*0.25, budget_val*3)
-            tier  = np.where(amt >= budget_val*1.5, "🔥", np.where(amt >= budget_val*0.8, "⚖️", "🔍"))
-            alloc_buy   = tier + " €" + amt.round(0).astype(int).astype(str)
-            alloc_watch = "👀 €" + (budget_val*0.25*(0.5+conf)).round(0).astype(int).astype(str)
-
-            s["Alloc"] = np.where(s["action"]=="AVOID", "⛔ Skip",
-                         np.where(s["action"]=="WAIT",  "—",
-                         np.where(s["action"]=="WATCH", alloc_watch, alloc_buy)))
-
-            # Format display columns
-            result_df = pd.DataFrame({
-                "#":       range(1, len(s)+1),
-                "Ticker":  s["ticker"],
-                "Name":    s["name"].fillna("") if "name" in s.columns else "",
-                "Price":   pd.to_numeric(s.get("price"), errors="coerce").round(2),
-                "Dist%":   pd.to_numeric(s.get("dist_ma200"), errors="coerce").round(2).fillna(0),
-                "52W%":    pd.to_numeric(s.get("dist_52w"),  errors="coerce").round(2),
-                "RSI":     s["rsi"].round(1),
-                "MACD":    np.where(pd.to_numeric(s.get("macd_bull",0), errors="coerce").fillna(0)>0, "▲ Bull", "▼ Bear"),
-                "Vol%":    s["vol_pct"].round(2),
-                "Action":  s["action"],
-                "Score":   s["score"].round(3),
-                "Knife":   np.where((pd.to_numeric(s.get("is_knife",0), errors="coerce").fillna(0)>0) &
-                                    (pd.to_numeric(s.get("reversal",0), errors="coerce").fillna(0)==0), "⚠️", ""),
-                "Alloc":   s["Alloc"],
-                "PE":      pd.to_numeric(s.get("pe_ratio"),  errors="coerce").round(1).astype(str).replace("nan","—"),
-                "Div%":    (pd.to_numeric(s.get("div_yield"), errors="coerce")*100).round(1).astype(str).replace("nan","—"),
-                "VGrade":  s["value_grade"].fillna("—") if "value_grade" in s.columns else "—",
-            })
-
-            action_order = {"BUY":0,"WATCH":1,"SELL":2,"AVOID":3,"WAIT":4}
-            result_df["_an"] = result_df["Action"].map(action_order).fillna(5)
-            result_df = (result_df.sort_values(["_an","Score"], ascending=[True,False])
-                                  .drop(columns=["_an"])
-                                  .reset_index(drop=True))
-            result_df["#"] = range(1, len(result_df)+1)
+        with st.spinner(f"⚡ Classifying {len(sig):,} signals…"):
+            sig = classify_strategies(sig)
+            result_df = build_result_df(sig, budget, fg, rm)
             computed = sig["computed_at"].iloc[0] if "computed_at" in sig.columns else "unknown"
             st.session_state["scan_results"] = result_df
-            st.session_state["scan_status"]  = f"⚡ {len(result_df):,} pre-computed signals · updated: {computed}"
+            st.session_state["scan_status"]  = (
+                f"⚡ {len(result_df):,} signals · "
+                f"Core:{result_df['_core'].sum()} · "
+                f"Value:{result_df['_value'].sum()} · "
+                f"Momentum:{result_df['_momentum'].sum()} · "
+                f"Dark Horse:{result_df['_darkhorse'].sum()} · "
+                f"updated: {computed}")
         st.rerun()
 
-    # ── Display results ───────────────────────────────────────────────
     if "scan_results" not in st.session_state:
-        st.info("Click **Run Scan** to start. Pre-computed signals load instantly; live scan takes 1–3 minutes.")
+        st.info("Click **Run Scan** to load signals.")
         return
 
     result_df = st.session_state["scan_results"]
     st.caption(st.session_state.get("scan_status",""))
 
-    # KPI row
-    n_buy   = int((result_df["Action"]=="BUY").sum())
-    n_watch = int((result_df["Action"]=="WATCH").sum())
-    n_sell  = int((result_df["Action"]=="SELL").sum())
-    n_avoid = int((result_df["Action"]=="AVOID").sum())
-    n_wait  = int((result_df["Action"]=="WAIT").sum())
+    # ── Strategy KPI row ─────────────────────────────────────────────
+    k1,k2,k3,k4 = st.columns(4)
+    k1.metric("🟡 CORE",       int(result_df["_core"].sum()))
+    k2.metric("🔵 VALUE",      int(result_df["_value"].sum()))
+    k3.metric("🔴 MOMENTUM",   int(result_df["_momentum"].sum()))
+    k4.metric("⚡ DARK HORSE", int(result_df["_darkhorse"].sum()))
 
-    k1,k2,k3,k4,k5 = st.columns(5)
-    k1.metric("🟢 BUY",   n_buy)
-    k2.metric("👀 WATCH", n_watch)
-    k3.metric("🔴 SELL",  n_sell)
-    k4.metric("⛔ AVOID", n_avoid)
-    k5.metric("🟡 WAIT",  n_wait)
+    # ── Strategy tabs ────────────────────────────────────────────────
+    tab_core, tab_value, tab_mom, tab_dh, tab_live = st.tabs([
+        "🟡 CORE", "🔵 VALUE", "🔴 MOMENTUM", "⚡ DARK HORSE", "🎯 LIVE DECISION"
+    ])
 
-    # Tab filter
-    tab_names = ["All", "🟢 BUY", "👀 WATCH", "⛔ AVOID", "🔴 SELL", "🟡 WAIT"]
-    if "VGrade" in result_df.columns:
-        tab_names += ["💎 Value A", "🔷 Value B"]
+    with tab_core:
+        st.caption("ETF timing — accumulate on dips, trim on highs. Capital preservation + compounding.")
+        df_core = result_df[result_df["_core"]].sort_values("Score", ascending=False).reset_index(drop=True)
+        df_core.insert(0,"#",range(1,len(df_core)+1))
+        _show_strategy_table(df_core, "CORE ETFs", "#f59e0b",
+            "No ETF dip signals in current universe. Try 'All ETFs' preset.")
 
-    tabs = st.tabs(tab_names)
-    action_map = {
-        "All": None,
-        "🟢 BUY": "BUY",
-        "👀 WATCH": "WATCH",
-        "⛔ AVOID": "AVOID",
-        "🔴 SELL": "SELL",
-        "🟡 WAIT": "WAIT",
-        "💎 Value A": "VALUE_A",
-        "🔷 Value B": "VALUE_B",
-    }
+    with tab_value:
+        st.caption("Undervalued quality stocks — mean reversion play. Higher win rate, slower returns.")
+        df_val = result_df[result_df["_value"]].sort_values("Score", ascending=False).reset_index(drop=True)
+        df_val.insert(0,"#",range(1,len(df_val)+1))
+        _show_strategy_table(df_val, "VALUE Stocks", "#0284c7",
+            "No value signals found. Requires Grade A/B + oversold technicals. Try 'Global Stocks' preset.")
 
-    display_cols = [c for c in result_df.columns
-                    if c not in ("Source","Score","Conf","RSI↗","MACD⚡")]
+    with tab_mom:
+        st.caption("Momentum plays — buy strength, ride the trend. Strong revenue growth + technical breakout.")
+        df_mom = result_df[result_df["_momentum"]].sort_values("Score", ascending=False).reset_index(drop=True)
+        df_mom.insert(0,"#",range(1,len(df_mom)+1))
+        _show_strategy_table(df_mom, "MOMENTUM Stocks", "#dc2626",
+            "No momentum signals found. Requires price near/above MA200 + RSI 50–72 + revenue growth. Try 'US Stocks' preset.")
 
-    def _style_action(val):
-        colors = {"BUY":"#0d9488","WATCH":"#0284c7","SELL":"#dc2626","AVOID":"#d97706","WAIT":"#64748b"}
-        return f"color: {colors.get(val,'#64748b')}; font-weight: 600;"
+    with tab_dh:
+        st.caption("Dark horses — beaten down but growing fast. Lower win rate, high upside potential.")
+        df_dh = result_df[result_df["_darkhorse"]].sort_values("Score", ascending=False).reset_index(drop=True)
+        df_dh.insert(0,"#",range(1,len(df_dh)+1))
+        _show_strategy_table(df_dh, "DARK HORSE Stocks", "#7c3aed",
+            "No dark horse signals. Requires oversold technicals + high revenue growth (>15%) + not already Grade A/B.")
 
-    for tab, tname in zip(tabs, tab_names):
-        with tab:
-            key = action_map[tname]
-            if key is None:
-                df_show = result_df
-            elif key == "VALUE_A":
-                df_show = result_df[result_df.get("VGrade","—") == "A"] if "VGrade" in result_df.columns else result_df
-            elif key == "VALUE_B":
-                df_show = result_df[result_df.get("VGrade","—").isin(["A","B"])] if "VGrade" in result_df.columns else result_df
-            else:
-                df_show = result_df[result_df["Action"] == key]
+    with tab_live:
+        st.caption("Top picks interleaved across all strategies — one actionable view.")
+        # Interleave: top N from each strategy, round-robin
+        N = 10
+        frames = []
+        for strat, label, flag in [
+            ("🟡 CORE",      "CORE",       "_core"),
+            ("🔵 VALUE",     "VALUE",      "_value"),
+            ("🔴 MOMENTUM",  "MOMENTUM",   "_momentum"),
+            ("⚡ DARK HORSE","DARK HORSE", "_darkhorse"),
+        ]:
+            sub = result_df[result_df[flag]].sort_values("Score", ascending=False).head(N).copy()
+            sub.insert(0, "Strategy", strat)
+            frames.append(sub)
 
-            if df_show.empty:
-                st.info("No results in this category.")
-                continue
-
-            show_cols = [c for c in display_cols if c in df_show.columns]
-            st.dataframe(
-                df_show[show_cols].style.applymap(_style_action, subset=["Action"]),
-                use_container_width=True,
-                height=min(600, 40 + len(df_show)*35),
-                hide_index=True,
-            )
-
-    # Download
-    csv_data = result_df.to_csv(index=False).encode("utf-8")
-    st.download_button("⬇️ Download CSV", csv_data, "signals.csv", "text/csv")
+        if frames:
+            live_df = pd.concat(frames, ignore_index=True)
+            # Interleave by position within each strategy group
+            live_df["_strat_rank"] = live_df.groupby("Strategy").cumcount()
+            live_df = (live_df.sort_values(["_strat_rank","Score"], ascending=[True,False])
+                              .drop(columns=["_strat_rank"])
+                              .reset_index(drop=True))
+            live_df.insert(0,"#",range(1,len(live_df)+1))
+            _show_strategy_table(live_df, "LIVE DECISION", "#1a56db",
+                "No signals across any strategy.")
+        else:
+            st.info("Run a scan with a broader preset to see Live Decision picks.")
 
 
 # ───────────────────────────────────────────────────────────────────
