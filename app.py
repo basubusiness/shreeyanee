@@ -68,7 +68,9 @@ html, body, [class*="css"] {
 #MainMenu, footer, header { visibility: hidden; }
 .block-container { padding-top: 1rem !important; }
 /* Always show sidebar collapse/expand toggle */
-[data-testid="collapsedControl"] { display: flex !important; }
+[data-testid="collapsedControl"] { display: flex !important; visibility: visible !important; }
+/* Ensure sidebar is never fully hidden */
+[data-testid="stSidebar"] { min-width: 240px; }
 
 /* Metric cards */
 [data-testid="metric-container"] {
@@ -231,17 +233,16 @@ def load_signals():
         sb = _get_supabase()
         if sb is None:
             return pd.DataFrame()
-        # Single request — Supabase default limit is 1000 rows
-        # Use limit(5000) to get all rows in one call
+        # Fetch all signals — strategy classifier handles filtering
         res = (sb.table("signals")
                  .select("ticker,action,score,price,ma200,dist_ma200,rsi,rsi_rising,"
                          "macd_bull,macd_accel,vol_pct,conf,is_knife,reversal,"
                          "dist_52w,pe_ratio,div_yield,market_cap,beta,value_score,"
                          "value_grade,name,isin,type,country,sector,domicile,"
                          "dist_policy,ter,fund_size_eur,replication,strategy,"
+                         "roe,rev_growth,debt_equity,fcf_yield,peg,"
                          "data_source,computed_at")
-                 .neq("action", "WAIT")
-                 .limit(5000)
+                 .limit(10000)
                  .execute())
         if not res.data:
             return pd.DataFrame()
