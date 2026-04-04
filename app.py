@@ -1944,7 +1944,7 @@ def render_deepdive(budget):
     st.plotly_chart(fig_ind, use_container_width=True)
 
     # ── Fundamentals panel ────────────────────────────────────────────
-    if not is_etf and fund_data:
+    if not is_etf:
         st.markdown("**📊 Fundamentals**")
         def _fmt(v, mult=1, pct=False, suffix=""):
             try:
@@ -1952,15 +1952,31 @@ def render_deepdive(budget):
                 return f"{f:.1f}%" if pct else f"{f:.2f}{suffix}"
             except: return "—"
 
-        f1,f2,f3,f4 = st.columns(4)
-        f1.metric("PE",          _fmt(pe))
-        f1.metric("P/B",         _fmt(fund_data.get("fmp_pb")))
-        f2.metric("PEG",         _fmt(fund_data.get("fmp_peg")))
-        f2.metric("FCF Yield",   _fmt(fund_data.get("fmp_fcf_yield"), mult=100, pct=True))
-        f3.metric("ROE",         _fmt(fund_data.get("fmp_roe"), mult=100, pct=True))
-        f3.metric("D/E",         _fmt(fund_data.get("fmp_debt_eq")))
-        f4.metric("Div Yield",   _fmt(div, mult=100, pct=True))
-        f4.metric("Rev Growth",  _fmt(fund_data.get("fmp_rev_growth"), mult=100, pct=True))
+        fund_fields = ["fmp_pe_ttm","fmp_pb","fmp_peg","fmp_fcf_yield",
+                       "fmp_roe","fmp_debt_eq","fmp_rev_growth","fmp_div_yield"]
+        fund_coverage = sum(1 for k in fund_fields
+                            if fund_data.get(k) is not None
+                            and str(fund_data.get(k)) not in ("nan","None",""))
+
+        if fund_coverage < 2:
+            st.warning(
+                "⚠️ **Not enough fundamental data available for this ticker.** "
+                "yfinance may be rate-limited or this stock has limited coverage. "
+                "Try clicking **🔄 Refresh** in a few minutes."
+            )
+            st.caption("Technical signals above are still valid. Fundamentals require a second attempt.")
+        else:
+            if fund_coverage < 4:
+                st.caption(f"⚠️ Partial data — {fund_coverage}/8 fields available. Click 🔄 Refresh for more.")
+            f1,f2,f3,f4 = st.columns(4)
+            f1.metric("PE",          _fmt(pe))
+            f1.metric("P/B",         _fmt(fund_data.get("fmp_pb")))
+            f2.metric("PEG",         _fmt(fund_data.get("fmp_peg")))
+            f2.metric("FCF Yield",   _fmt(fund_data.get("fmp_fcf_yield"), mult=100, pct=True))
+            f3.metric("ROE",         _fmt(fund_data.get("fmp_roe"), mult=100, pct=True))
+            f3.metric("D/E",         _fmt(fund_data.get("fmp_debt_eq")))
+            f4.metric("Div Yield",   _fmt(div, mult=100, pct=True))
+            f4.metric("Rev Growth",  _fmt(fund_data.get("fmp_rev_growth"), mult=100, pct=True))
 
         if value_available:
             st.markdown(f"**Value Score: {value_score}/100 (Grade {value_grade})**")
