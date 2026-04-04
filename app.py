@@ -1454,12 +1454,12 @@ def _show_strategy_table(df, label, color, empty_msg):
     selected = edited[edited["🔬"] == True]
     if not selected.empty:
         ticker = selected.iloc[0]["Ticker"]
-        # Replace hint with the actual button above the table
         with dive_area:
             if st.button(f"🔬 Deep Dive: {ticker}", type="primary",
                          key=f"dive_{label}_{ticker}", use_container_width=True):
-                st.session_state["dd_ticker"] = ticker
-                st.session_state["dd_auto"]   = True
+                st.session_state["dd_ticker"]   = ticker
+                st.session_state["dd_auto"]     = True
+                st.session_state["_active_tab"] = 1  # switch to Deep Dive tab
                 st.rerun()
 
     csv = df[display].to_csv(index=False).encode("utf-8")
@@ -1597,14 +1597,29 @@ def render_scanner(tickers, budget, vix, fg, rm):
                 if val == "▼": return "color:#dc2626;"
                 return ""
             display = [c for c in df_core.columns if not c.startswith("_")]
-            st.data_editor(
-                df_core[display].assign(**{"🔬": False}).pipe(lambda d: d[["🔬"]+[c for c in d.columns if c!="🔬"]]),
-                column_config={"🔬": st.column_config.CheckboxColumn("🔬", help="Tick to Deep Dive", width="small")},
-                disabled=[c for c in df_core[display].columns],
-                use_container_width=True, height=min(500, 45+len(df_core)*35), hide_index=True, key="tbl_core"
-            )
-            csv = df_core[display].to_csv(index=False).encode("utf-8")
-            st.download_button("⬇️ Download", csv, "timing_signals.csv", "text/csv", key="dl_core")
+
+            # ── Visual risk grouping with section headers ─────────────
+            steady_df = df_core[df_core["Risk"] == "🟢 Steady"].copy()
+            sector_df = df_core[df_core["Risk"] == "🟡 Sector"].copy()
+            spec_df   = df_core[df_core["Risk"].str.startswith("🔴", na=False)].copy()
+
+            if not steady_df.empty:
+                st.markdown("#### 🟢 Steady — Broad diversified ETFs · Lowest risk")
+                st.caption("World index, S&P 500, bonds. Dips here are almost always mean-reversion opportunities.")
+                _show_strategy_table(steady_df.reset_index(drop=True), "Timing_Steady", "#0d9488",
+                    "No steady ETF signals.")
+
+            if not sector_df.empty:
+                st.markdown("#### 🟡 Sector — Sector & country ETFs · Moderate risk")
+                st.caption("Tech, healthcare, India, emerging markets etc. More concentrated — dips can be deeper.")
+                _show_strategy_table(sector_df.reset_index(drop=True), "Timing_Sector", "#d97706",
+                    "No sector ETF signals.")
+
+            if not spec_df.empty:
+                st.markdown("#### 🔴 Speculative — Niche ETFs & stocks · Higher risk")
+                st.caption("Crypto, nuclear, ARK-style, individual stocks. Same dip signal — recovery not guaranteed. Size smaller.")
+                _show_strategy_table(spec_df.reset_index(drop=True), "Timing_Spec", "#dc2626",
+                    "No speculative signals.")
         else:
             st.info("No timing signals in this filter set. Switch to an ETF preset (e.g. All ETFs or UCITS ETFs) to see dip opportunities.")
 
@@ -2180,6 +2195,9 @@ def render_value_screen():
 
 def main():
     preset, filters, budget, tickers, vix, fg, rm = render_sidebar()
+
+    # Auto-switch to Deep Dive tab when triggered from scanner
+    default_tab = st.session_state.pop("_active_tab", 0)
 
     tab_scanner, tab_deepdive, tab_value = st.tabs([
         "🔭 Market Scanner",
