@@ -1507,186 +1507,167 @@ def render_scanner(tickers, budget, vix, fg, rm):
         return
 
     result_df = st.session_state["scan_results"]
-    st.caption(st.session_state.get("scan_status",""))
 
-    # ── Guard: if session has old-format results, clear and ask for rescan
+    # ── Guard: stale cache from old format
     if "_core" not in result_df.columns:
         st.session_state.pop("scan_results", None)
         st.info("Strategy view updated — click **Run Scan** to reload.")
         return
 
-    # ── Strategy KPI row ─────────────────────────────────────────────
-    k1,k2,k3,k4 = st.columns(4)
-    k1.metric("🟡 CORE — ETF dips",      int(result_df["_core"].sum()))
-    k2.metric("🔵 VALUE — Quality dips",  int(result_df["_value"].sum()))
-    k3.metric("🔴 MOMENTUM — Runners",    int(result_df["_momentum"].sum()))
-    k4.metric("⚡ DARK HORSE — Hidden",   int(result_df["_darkhorse"].sum()))
+    # ── Derive context from the actual data, not the preset name ─────
+    has_etfs   = result_df["_core"].any()
+    has_stocks = result_df["_value"].any() or result_df["_momentum"].any() or result_df["_darkhorse"].any()
+    n_total    = len(result_df)
+    computed   = st.session_state.get("scan_status","").split("updated:")[-1].strip() if "updated:" in st.session_state.get("scan_status","") else ""
 
-    # ── Strategy tabs ────────────────────────────────────────────────
+    # ── Summary bar — one source of truth ────────────────────────────
+    st.caption(f"{n_total:,} signals in scope · updated: {computed}" if computed else f"{n_total:,} signals in scope")
+
+    n_core = int(result_df["_core"].sum())
+    n_val  = int(result_df["_value"].sum())
+    n_mom  = int(result_df["_momentum"].sum())
+    n_dh   = int(result_df["_darkhorse"].sum())
+
+    k1,k2,k3,k4 = st.columns(4)
+    k1.metric("🟡 Timing",      n_core, help="Dip signals — ETFs sorted by risk, stocks flagged as speculative")
+    k2.metric("🔵 Value",       n_val,  help="Oversold quality stocks with solid fundamentals")
+    k3.metric("🔴 Momentum",    n_mom,  help="Stocks running with strong revenue growth")
+    k4.metric("⚡ Dark Horse",  n_dh,   help="Beaten-down stocks with high growth potential")
+
+    # ── Dynamic tab labels — no hardcoded asset class ────────────────
     tab_core, tab_value, tab_mom, tab_dh, tab_live = st.tabs([
-        "🟡 CORE — ETF Timing",
-        "🔵 VALUE — Quality Dips",
-        "🔴 MOMENTUM — Buy Strength",
-        "⚡ DARK HORSE — Hidden Growth",
-        "🎯 LIVE DECISION",
+        f"🟡 Timing ({n_core})",
+        f"🔵 Value ({n_val})",
+        f"🔴 Momentum ({n_mom})",
+        f"⚡ Dark Horse ({n_dh})",
+        "🎯 Best Picks",
     ])
 
     with tab_core:
-        st.caption("Timing signals for ETFs and stocks — sorted by risk level. Best suited for ETF accumulation.")
+        st.caption("Dip timing signals — sorted by risk. ETFs are most suitable; stocks included with caution warnings.")
         with st.expander("ℹ️ How does this work?", expanded=False):
             st.markdown(
-                "**What this tab shows:** Assets (mainly ETFs) that have dipped and are showing early recovery signs — "
-                "sorted by risk level so you know what you're getting into.\n\n"
-                "**The Risk column tells you everything:**\n"
+                "**What this tab shows:** Assets that have dipped and are showing early recovery signs, "
+                "sorted by risk so you know what you're getting into.\n\n"
+                "**The Risk column:**\n"
                 "- 🟢 **Steady** — broad diversified ETFs (world index, S&P 500, bonds). "
-                "A dip here is almost always a mean-reversion opportunity. Lowest risk.\n"
-                "- 🟡 **Sector** — sector or country ETFs (tech, healthcare, India, emerging markets). "
-                "Still diversified within the theme, but more concentrated. Moderate risk.\n"
-                "- 🔴 **Speculative** — crypto ETFs, niche themes (nuclear, gaming, ARK-style), "
-                "high-TER or small funds, and individual stocks. "
-                "Same dip signal, but the underlying assets can stay down or go to zero. Tread carefully.\n\n"
+                "Dips here are almost always temporary. Lowest risk.\n"
+                "- 🟡 **Sector** — sector or country ETFs (tech, healthcare, India etc). "
+                "More concentrated, so dips can be deeper. Moderate risk.\n"
+                "- 🔴 **Speculative** — niche ETFs (crypto, nuclear, ARK-style) and individual stocks. "
+                "Same technical dip signal, but these can stay down or go further. Tread carefully.\n\n"
                 "**To qualify:** Price 5%+ below 200-day average · RSI under 48 · MACD turning bullish.\n\n"
-                "**Columns:** Dist% = how far below long-term average · RSI = oversold meter (lower = more oversold) · "
-                "MACD ▲ = selling pressure easing · Alloc = suggested amount from your budget.\n\n"
-                "**What to do:** Focus on 🟢 Steady first. Use 🟡 Sector for tactical bets. "
-                "Treat 🔴 Speculative as high-risk opportunities — smaller position sizes, more monitoring."
+                "**What to do:** Focus on 🟢 Steady first for capital preservation. "
+                "Use 🟡 Sector for tactical bets. Size 🔴 Speculative positions smaller."
             )
         df_core = result_df[result_df["_core"]].copy()
         if not df_core.empty:
-            # Sort: Steady first, then Sector, then Speculative — within each by Score desc
-            risk_order = {"🟢 Steady": 0, "🟡 Sector": 1,
-                          "🔴 Speculative": 2, "🔴 Speculative (Stock)": 3, "": 4}
+            risk_order = {"🟢 Steady": 0, "🟡 Sector": 1, "🔴 Speculative": 2, "🔴 Speculative (Stock)": 3, "": 4}
             df_core["_risk_n"] = df_core["Risk"].map(risk_order).fillna(4)
             df_core = df_core.sort_values(["_risk_n","Score"], ascending=[True,False]).drop(columns=["_risk_n"]).reset_index(drop=True)
             df_core.insert(0,"#",range(1,len(df_core)+1))
-
-            # Warning banner before speculative rows
             n_steady = (df_core["Risk"]=="🟢 Steady").sum()
             n_sector = (df_core["Risk"]=="🟡 Sector").sum()
             n_spec   = df_core["Risk"].str.startswith("🔴").sum()
-            col1,col2,col3 = st.columns(3)
-            col1.metric("🟢 Steady ETFs",    n_steady)
-            col2.metric("🟡 Sector ETFs",    n_sector)
-            col3.metric("🔴 Speculative",    n_spec)
-
+            c1,c2,c3 = st.columns(3)
+            c1.metric("🟢 Steady",     n_steady)
+            c2.metric("🟡 Sector",     n_sector)
+            c3.metric("🔴 Speculative",n_spec)
             if n_spec > 0:
-                st.warning("⚠️ **Speculative signals included** — crypto ETFs, niche themes, and individual stocks "
-                           "appear at the bottom of the table. These carry significantly higher risk than broad ETFs. "
-                           "The same dip signal does not guarantee the same recovery.")
-
+                st.warning("⚠️ Speculative signals at the bottom include individual stocks and niche ETFs. "
+                           "The dip signal is the same, but recovery is not guaranteed. Size these positions smaller.")
             def _style_core(val):
-                if val == "🟢 Steady":   return "color:#0d9488;font-weight:700;"
-                if val == "🟡 Sector":   return "color:#d97706;font-weight:600;"
-                if str(val).startswith("🔴"): return "color:#dc2626;font-weight:600;"
-                colors = {"BUY":"#0d9488","WATCH":"#0284c7","SELL":"#dc2626","AVOID":"#d97706"}
-                if val in colors: return f"color:{colors[val]};font-weight:600;"
+                if val == "🟢 Steady":           return "color:#0d9488;font-weight:700;"
+                if val == "🟡 Sector":           return "color:#d97706;font-weight:600;"
+                if str(val).startswith("🔴"):    return "color:#dc2626;font-weight:600;"
+                c = {"BUY":"#0d9488","WATCH":"#0284c7","SELL":"#dc2626","AVOID":"#d97706"}
+                if val in c: return f"color:{c[val]};font-weight:600;"
                 if val == "▲": return "color:#0d9488;"
                 if val == "▼": return "color:#dc2626;"
                 return ""
-
             display = [c for c in df_core.columns if not c.startswith("_")]
-            style_cols = [c for c in ["Signal","Risk","MACD"] if c in display]
-            st.dataframe(
-                df_core[display].style.applymap(_style_core, subset=style_cols),
-                use_container_width=True,
-                height=min(500, 45 + len(df_core)*35),
-                hide_index=True,
+            st.data_editor(
+                df_core[display].assign(**{"🔬": False}).pipe(lambda d: d[["🔬"]+[c for c in d.columns if c!="🔬"]]),
+                column_config={"🔬": st.column_config.CheckboxColumn("🔬", help="Tick to Deep Dive", width="small")},
+                disabled=[c for c in df_core[display].columns],
+                use_container_width=True, height=min(500, 45+len(df_core)*35), hide_index=True, key="tbl_core"
             )
             csv = df_core[display].to_csv(index=False).encode("utf-8")
-            st.download_button("⬇️ Download CORE signals", csv, "core_signals.csv", "text/csv", key="dl_core")
+            st.download_button("⬇️ Download", csv, "timing_signals.csv", "text/csv", key="dl_core")
         else:
-            st.info(
-                "No CORE timing signals in the current preset. "
-                "Switch to **All ETFs** or **UCITS ETFs** in the sidebar to see ETF dip opportunities. "
-                "If you're on a stocks preset, CORE signals only appear for any ETFs mixed into that universe."
-            )
+            st.info("No timing signals in this filter set. Switch to an ETF preset (e.g. All ETFs or UCITS ETFs) to see dip opportunities.")
 
     with tab_value:
-        st.caption("Undervalued quality stocks — mean reversion play. Higher win rate, slower returns.")
+        st.caption("Oversold quality stocks with solid fundamentals — medium-term mean reversion plays.")
         with st.expander("ℹ️ How does this work?", expanded=False):
             st.markdown(
-                "**What this tab shows:** Good quality companies whose stock price has temporarily fallen — a sale on a brand you trust.\n\n"
-                "**The idea:** Strong businesses recover from dips. If fundamentals are solid but price is down, that's often opportunity.\n\n"
+                "**What this tab shows:** Good businesses whose price has temporarily fallen — a sale on a stock you'd want to own anyway.\n\n"
                 "**To qualify (ALL must pass):** 10%+ below 200-day average · RSI under 48 · MACD bullish · Grade A or B · ROE above 10% · Revenue growing.\n\n"
-                "**Grade** = our score based on PE, P/B, Free Cash Flow, Return on Equity, Debt, and Revenue growth. A = top quality, D = weak or expensive.\n\n"
-                "**RevGr%** = how fast revenue is growing year-on-year. **Driver** = the main reason this appeared.\n\n"
-                "**What to do:** Medium-term plays (6–18 months). Price recovers toward fair value as the market recognises business quality."
+                "**Grade** = quality score from PE, P/B, Free Cash Flow, ROE, Debt, and Revenue growth. A = top quality. D = weak or expensive.\n\n"
+                "**What to do:** Medium-term holds (6–18 months). The idea is the price recovers toward fair value as the market recognises the quality."
             )
         df_val = result_df[result_df["_value"]].sort_values("Score", ascending=False).reset_index(drop=True)
         df_val.insert(0,"#",range(1,len(df_val)+1))
-        _show_strategy_table(df_val, "VALUE Stocks", "#0284c7",
-            "No value signals found. Requires Grade A/B + oversold technicals. Try 'Global Stocks' preset.")
+        _show_strategy_table(df_val, "Value", "#0284c7",
+            "No value signals in this filter set. Needs Grade A/B + oversold technicals + fundamental data. Try Global Stocks or US Stocks preset.")
 
     with tab_mom:
-        st.caption("Momentum plays — buy strength, ride the trend. Strong revenue growth + technical breakout.")
+        st.caption("Stocks already running — strong revenue growth confirmed by the price action.")
         with st.expander("ℹ️ How does this work?", expanded=False):
             st.markdown(
-                "**What this tab shows:** Companies already moving — strong revenue growth AND the stock price confirms it. We buy strength, not weakness.\n\n"
-                "**The idea:** When a business is genuinely growing fast and the market recognises it, there's often more upside ahead.\n\n"
-                "**To qualify (ALL must pass):** Price near or above 200-day average · RSI 50–72 (strong but not overheated) · MACD bullish · Revenue growing 20%+ per year.\n\n"
-                "**Key difference from Value:** Value buys cheap things that should recover. Momentum buys strong things that should keep running. "
-                "These use *opposite* signals — a stock here would likely fail the Value screen.\n\n"
-                "**Risk:** Momentum can reverse sharply. These need tighter monitoring than Value picks."
+                "**What this tab shows:** Companies growing fast where the stock price is already reflecting it. We buy strength here, not weakness.\n\n"
+                "**To qualify (ALL must pass):** Price near or above 200-day average · RSI 50–72 · MACD bullish · Revenue growing 20%+.\n\n"
+                "**Key difference from Value:** Value buys dips. Momentum buys strength. A stock appearing here would likely fail the Value screen — that's intentional.\n\n"
+                "**Risk:** Momentum reverses sharply. Needs more active monitoring than Value picks."
             )
         df_mom = result_df[result_df["_momentum"]].sort_values("Score", ascending=False).reset_index(drop=True)
         df_mom.insert(0,"#",range(1,len(df_mom)+1))
-        _show_strategy_table(df_mom, "MOMENTUM Stocks", "#dc2626",
-            "No momentum signals found. Requires price near/above MA200 + RSI 50–72 + revenue growth. Try 'US Stocks' preset.")
+        _show_strategy_table(df_mom, "Momentum", "#dc2626",
+            "No momentum signals in this filter set. Needs price near/above MA200 + RSI 50–72 + revenue growth data. Try US Stocks preset after rebuilding signals.")
 
     with tab_dh:
-        st.caption("Dark horses — beaten down but growing fast. Lower win rate, high upside potential.")
+        st.caption("Beaten-down stocks with high revenue growth — the market is wrong, or early.")
         with st.expander("ℹ️ How does this work?", expanded=False):
             st.markdown(
-                "**What this tab shows:** Companies the market has punished heavily, but whose business is still growing fast. "
-                "The market is wrong (or early) — and you're trying to get in before it figures that out.\n\n"
-                "**To qualify (ALL must pass):** 15%+ below 200-day average · RSI 28–48 (oversold but recovering) · "
-                "MACD turning bullish · Revenue growing 15%+ · NOT already Grade A/B (those go to Value instead).\n\n"
-                "**Why not Grade A/B?** Grade A/B beaten-down stocks go to the VALUE tab. Dark Horses are riskier — "
-                "the financials aren't as clean, but the growth story may be real. Higher risk, higher potential reward.\n\n"
-                "**Be honest about the risk:** Most dark horses don't come good. Size positions smaller and diversify across several. "
-                "**RevGr%** is the key column — if revenue isn't growing, it's not a dark horse, it's just a broken stock."
+                "**What this tab shows:** Companies the market has punished, but whose revenue is still growing fast.\n\n"
+                "**To qualify (ALL must pass):** 15%+ below 200-day average · RSI 28–48 recovering · MACD turning bullish · Revenue growing 15%+ · NOT Grade A/B.\n\n"
+                "**Why not Grade A/B?** Those go to Value. Dark Horses are the riskier version — growth story may be real, financials aren't as clean.\n\n"
+                "**Be realistic:** Most dark horses don't come good. Use smaller position sizes. RevGr% is the critical column — no growth = not a dark horse, just a broken stock."
             )
         df_dh = result_df[result_df["_darkhorse"]].sort_values("Score", ascending=False).reset_index(drop=True)
         df_dh.insert(0,"#",range(1,len(df_dh)+1))
-        _show_strategy_table(df_dh, "DARK HORSE Stocks", "#7c3aed",
-            "No dark horse signals. Requires oversold technicals + high revenue growth (>15%) + not already Grade A/B.")
+        _show_strategy_table(df_dh, "Dark Horse", "#7c3aed",
+            "No dark horse signals in this filter set. Needs oversold technicals + revenue growth data (15%+). Try US Stocks or Global Stocks after rebuilding signals.")
 
     with tab_live:
-        st.caption("Top picks interleaved across all strategies — one actionable view.")
+        st.caption("Best picks across all strategies — one view, ranked and interleaved.")
         with st.expander("ℹ️ How does this work?", expanded=False):
             st.markdown(
-                "**What this tab shows:** The best picks from all four strategies in one list — so you don't need to read four tabs.\n\n"
-                "**How it's built:** Top 10 from each strategy, interleaved — one CORE, one VALUE, one MOMENTUM, one DARK HORSE, repeat.\n\n"
-                "**Strategy column:** 🟡 CORE = ETF dip (lowest risk) · 🔵 VALUE = quality stock on sale (medium risk) · "
-                "🔴 MOMENTUM = growing fast, price confirming it (higher risk) · ⚡ DARK HORSE = growing fast, price hasn't caught up (highest risk, highest upside).\n\n"
-                "**How to use it:** Look at the Strategy column first. Pick the strategies that match your current risk appetite and focus on those rows. "
-                "Don't try to act on everything. Always do a Deep Dive before committing capital."
+                "**What this tab shows:** Top picks from each strategy combined — so you don't need to read all four tabs.\n\n"
+                "**How it's built:** Top 10 from each strategy, interleaved round-robin. No single strategy dominates.\n\n"
+                "**Strategy column:** 🟡 Timing = dip signal · 🔵 Value = quality on sale · 🔴 Momentum = running strong · ⚡ Dark Horse = hidden growth.\n\n"
+                "**How to use it:** Pick the strategies that fit your risk appetite and focus on those rows. Always Deep Dive before committing capital."
             )
-        # Interleave: top N from each strategy, round-robin
         N = 10
         frames = []
         for strat, label, flag in [
-            ("🟡 CORE",      "CORE",       "_core"),
-            ("🔵 VALUE",     "VALUE",      "_value"),
-            ("🔴 MOMENTUM",  "MOMENTUM",   "_momentum"),
-            ("⚡ DARK HORSE","DARK HORSE", "_darkhorse"),
+            ("🟡 Timing",     "Timing",     "_core"),
+            ("🔵 Value",      "Value",      "_value"),
+            ("🔴 Momentum",   "Momentum",   "_momentum"),
+            ("⚡ Dark Horse", "Dark Horse", "_darkhorse"),
         ]:
             sub = result_df[result_df[flag]].sort_values("Score", ascending=False).head(N).copy()
-            sub.insert(0, "Strategy", strat)
-            frames.append(sub)
-
+            if not sub.empty:
+                sub.insert(0, "Strategy", strat)
+                frames.append(sub)
         if frames:
             live_df = pd.concat(frames, ignore_index=True)
-            # Interleave by position within each strategy group
-            live_df["_strat_rank"] = live_df.groupby("Strategy").cumcount()
-            live_df = (live_df.sort_values(["_strat_rank","Score"], ascending=[True,False])
-                              .drop(columns=["_strat_rank"])
-                              .reset_index(drop=True))
+            live_df["_sr"] = live_df.groupby("Strategy").cumcount()
+            live_df = live_df.sort_values(["_sr","Score"], ascending=[True,False]).drop(columns=["_sr"]).reset_index(drop=True)
             live_df.insert(0,"#",range(1,len(live_df)+1))
-            _show_strategy_table(live_df, "LIVE DECISION", "#1a56db",
-                "No signals across any strategy.")
+            _show_strategy_table(live_df, "Best Picks", "#1a56db", "No signals across any strategy.")
         else:
-            st.info("Run a scan with a broader preset to see Live Decision picks.")
+            st.info("No signals found across any strategy. Try a broader preset or rebuild signals with fundamentals.")
 
 
 # ───────────────────────────────────────────────────────────────────
