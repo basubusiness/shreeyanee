@@ -1224,6 +1224,8 @@ def classify_strategies(s):
       is_core, is_value, is_momentum, is_darkhorse
     All vectorised — no Python loops.
     """
+    s = s.reset_index(drop=True)
+
     # Numeric columns with safe fallbacks
     dm    = pd.to_numeric(s.get("dist_ma200"),  errors="coerce").fillna(0)
     rsi   = pd.to_numeric(s.get("rsi"),         errors="coerce").fillna(50)
