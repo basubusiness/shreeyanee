@@ -65,12 +65,15 @@ html, body, [class*="css"] {
 }
 
 /* Hide Streamlit chrome */
-#MainMenu, footer, header { visibility: hidden; }
+#MainMenu { visibility: hidden; }
+footer { visibility: hidden; }
+/* Hide header text but keep the sidebar toggle button visible */
+header { visibility: hidden; }
+header [data-testid="stToolbar"] { visibility: visible !important; }
 .block-container { padding-top: 1rem !important; }
 /* Always show sidebar collapse/expand toggle */
 [data-testid="collapsedControl"] { display: flex !important; visibility: visible !important; }
-/* Ensure sidebar is never fully hidden */
-[data-testid="stSidebar"] { min-width: 240px; }
+section[data-testid="stSidebar"] { display: block !important; }
 
 /* Metric cards */
 [data-testid="metric-container"] {
