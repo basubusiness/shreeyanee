@@ -811,7 +811,7 @@ def fetch_yf_fundamentals_batch(tickers, max_workers=8, timeout=6):
     return results, timed_out
 
 def _get_fmp_key():
-    return os.environ.get("FMP_API_KEY","").strip() or ""
+    return st.secrets.get("FMP_API_KEY","").strip() or ""
 
 def fetch_fmp_fundamentals(ticker):
     key = _get_fmp_key()
