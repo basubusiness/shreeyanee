@@ -1243,57 +1243,62 @@ def render_scanner(tickers, budget, vix, fg, rm):
         if len(sig) == 0:
             st.warning("No pre-computed signals found. Ensure signals.csv is committed to the repo.")
             return
-        with st.spinner(f"⚡ Loading {len(sig)} pre-computed signals…"):
+        with st.spinner(f"⚡ Building results for {len(sig):,} signals…"):
             budget_val = budget or 1000
-            rows = []
-            for _, r in sig.iterrows():
-                action = str(r.get("action","WAIT"))
-                conf   = float(r.get("conf", 0.5) or 0.5)
-                vol    = float(r.get("vol_pct", 2) or 2)
-                dm     = float(r.get("dist_ma200", 0) or 0)
-                rsi_v  = float(r.get("rsi", 50) or 50)
-                if action == "AVOID":  alloc = "⛔ Skip"
-                elif action == "WAIT": alloc = "—"
-                elif action == "WATCH":
-                    alloc = f"👀 €{budget_val*0.25*(0.5+conf):,.0f}"
-                else:
-                    ctx_s = (40 if fg<35 else 20 if fg<50 else 0)/100
-                    sig_s = min(-dm/20,1)*0.5 + min((50-rsi_v)/50,1)*0.5 if dm<0 else 0
-                    amt   = budget_val*(ctx_s+sig_s)*(0.5+conf)*max(0.5,1-vol/20)*rm
-                    amt   = max(budget_val*0.25, min(amt, budget_val*3))
-                    tier  = "🔥" if amt>=budget_val*1.5 else "⚖️" if amt>=budget_val*0.8 else "🔍"
-                    alloc = f"{tier} €{amt:,.0f}"
-                pe   = r.get("pe_ratio")
-                div  = r.get("div_yield")
-                mcap = r.get("market_cap")
-                beta = r.get("beta")
-                dist_display = r.get("dist_ma200") if pd.notna(r.get("dist_ma200")) else r.get("ret_1m")
-                name, isin = get_name_isin(str(r.get("ticker","")))
-                rows.append({
-                    "Ticker":  r["ticker"],
-                    "Name":    r.get("name", name) or name,
-                    "Price":   round(float(r["price"]),2) if pd.notna(r.get("price")) else "—",
-                    "Dist%":   round(float(dist_display),2) if dist_display is not None and pd.notna(dist_display) else 0,
-                    "52W%":    r.get("dist_52w",0) if pd.notna(r.get("dist_52w")) else "—",
-                    "RSI":     round(float(r.get("rsi",50)),1) if pd.notna(r.get("rsi")) else "—",
-                    "MACD":    ("▲ Bull" if r.get("macd_bull",0) else "▼ Bear") if pd.notna(r.get("macd_bull")) else "—",
-                    "Vol%":    r.get("vol_pct",0) if pd.notna(r.get("vol_pct")) else "—",
-                    "Action":  action,
-                    "Score":   round(float(r.get("score",0) or 0),3),
-                    "Knife":   "⚠️" if r.get("is_knife",0) and not r.get("reversal",0) else "",
-                    "Alloc":   alloc,
-                    "PE":      f"{pe:.1f}" if pe and str(pe) != 'nan' else "—",
-                    "Beta":    f"{beta:.2f}" if beta and str(beta) != 'nan' else "—",
-                    "Div%":    f"{div*100:.1f}%" if div and str(div) != 'nan' else "—",
-                    "MCap":    f"${mcap/1e9:.1f}B" if mcap and str(mcap) != 'nan' else "—",
-                    "VGrade":  str(r.get("value_grade","")) if pd.notna(r.get("value_grade")) and str(r.get("value_grade","")) not in ("","nan","None") else "—",
-                    "Source":  r.get("data_source",""),
-                })
-            result_df = pd.DataFrame(rows)
+            s = sig.copy()
+
+            # Vectorised column construction — no Python loop
+            s["action"]   = s["action"].fillna("WAIT").astype(str)
+            s["conf"]     = pd.to_numeric(s.get("conf"),    errors="coerce").fillna(0.5)
+            s["vol_pct"]  = pd.to_numeric(s.get("vol_pct"), errors="coerce").fillna(2.0)
+            s["dist_ma200"] = pd.to_numeric(s.get("dist_ma200"), errors="coerce").fillna(0.0)
+            s["rsi"]      = pd.to_numeric(s.get("rsi"),     errors="coerce").fillna(50.0)
+            s["score"]    = pd.to_numeric(s.get("score"),   errors="coerce").fillna(0.0)
+
+            # Allocation — vectorised
+            ctx_s = (40 if fg < 35 else 20 if fg < 50 else 0) / 100
+            dm    = s["dist_ma200"]
+            rsi_v = s["rsi"]
+            conf  = s["conf"]
+            vol   = s["vol_pct"]
+            sig_s = (np.minimum(-dm/20, 1)*0.5 + np.minimum((50-rsi_v)/50, 1)*0.5).where(dm < 0, 0)
+            amt   = (budget_val * (ctx_s + sig_s) * (0.5 + conf)
+                     * np.maximum(0.5, 1 - vol/20) * rm).clip(budget_val*0.25, budget_val*3)
+            tier  = np.where(amt >= budget_val*1.5, "🔥", np.where(amt >= budget_val*0.8, "⚖️", "🔍"))
+            alloc_buy   = tier + " €" + amt.round(0).astype(int).astype(str)
+            alloc_watch = "👀 €" + (budget_val*0.25*(0.5+conf)).round(0).astype(int).astype(str)
+
+            s["Alloc"] = np.where(s["action"]=="AVOID", "⛔ Skip",
+                         np.where(s["action"]=="WAIT",  "—",
+                         np.where(s["action"]=="WATCH", alloc_watch, alloc_buy)))
+
+            # Format display columns
+            result_df = pd.DataFrame({
+                "#":       range(1, len(s)+1),
+                "Ticker":  s["ticker"],
+                "Name":    s["name"].fillna("") if "name" in s.columns else "",
+                "Price":   pd.to_numeric(s.get("price"), errors="coerce").round(2),
+                "Dist%":   pd.to_numeric(s.get("dist_ma200"), errors="coerce").round(2).fillna(0),
+                "52W%":    pd.to_numeric(s.get("dist_52w"),  errors="coerce").round(2),
+                "RSI":     s["rsi"].round(1),
+                "MACD":    np.where(pd.to_numeric(s.get("macd_bull",0), errors="coerce").fillna(0)>0, "▲ Bull", "▼ Bear"),
+                "Vol%":    s["vol_pct"].round(2),
+                "Action":  s["action"],
+                "Score":   s["score"].round(3),
+                "Knife":   np.where((pd.to_numeric(s.get("is_knife",0), errors="coerce").fillna(0)>0) &
+                                    (pd.to_numeric(s.get("reversal",0), errors="coerce").fillna(0)==0), "⚠️", ""),
+                "Alloc":   s["Alloc"],
+                "PE":      pd.to_numeric(s.get("pe_ratio"),  errors="coerce").round(1).astype(str).replace("nan","—"),
+                "Div%":    (pd.to_numeric(s.get("div_yield"), errors="coerce")*100).round(1).astype(str).replace("nan","—"),
+                "VGrade":  s["value_grade"].fillna("—") if "value_grade" in s.columns else "—",
+            })
+
             action_order = {"BUY":0,"WATCH":1,"SELL":2,"AVOID":3,"WAIT":4}
             result_df["_an"] = result_df["Action"].map(action_order).fillna(5)
-            result_df = result_df.sort_values(["_an","Score"],ascending=[True,False]).drop(columns=["_an"]).reset_index(drop=True)
-            result_df.insert(0,"#",result_df.index+1)
+            result_df = (result_df.sort_values(["_an","Score"], ascending=[True,False])
+                                  .drop(columns=["_an"])
+                                  .reset_index(drop=True))
+            result_df["#"] = range(1, len(result_df)+1)
             computed = sig["computed_at"].iloc[0] if "computed_at" in sig.columns else "unknown"
             st.session_state["scan_results"] = result_df
             st.session_state["scan_status"]  = f"⚡ {len(result_df):,} pre-computed signals · updated: {computed}"
