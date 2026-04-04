@@ -162,113 +162,98 @@ def _load_disk_cache():
 # UNIVERSE LOADERS  (cached globally — loaded once)
 # ───────────────────────────────────────────────────────────────────
 
-def _find_file(filename):
-    """Find a data file — works locally and on Streamlit Community Cloud."""
-    candidates = [
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), filename),
-        os.path.join(os.getcwd(), filename),
-        filename,
-    ]
-    for p in candidates:
-        if os.path.exists(p):
-            return p
-    return None
+def _get_supabase():
+    """Return a Supabase client using Streamlit secrets."""
+    try:
+        from supabase import create_client
+        url = st.secrets["SUPABASE_URL"]
+        key = st.secrets["SUPABASE_KEY"]
+        return create_client(url, key)
+    except Exception:
+        return None
 
 @st.cache_data(ttl=3600)
 def load_base_universe():
-    csv_path = _find_file("universe.csv")
-    if csv_path and os.path.exists(csv_path):
-        try:
-            df = pd.read_csv(csv_path)
-            for col in ["country","sector","name","category_group","category",
-                        "currency","yf_symbol","yf_suffix","isin"]:
-                if col not in df.columns:
-                    df[col] = ""
-            for col in df.columns:
-                if df[col].dtype == object:
-                    df[col] = df[col].fillna("").astype(str).str.strip()
-            df = df[df["ticker"].str.match(r"^[A-Z0-9]{2,6}$")]
-            df = df.drop_duplicates(subset=["ticker","type"], keep="first")
-            return df
-        except Exception as e:
-            st.warning(f"universe.csv load failed: {e}")
-    if FD_AVAILABLE:
-        try:
-            etfs     = fd.ETFs().select().copy()
-            equities = fd.Equities().select().copy()
-            etfs["type"]     = "ETF"
-            equities["type"] = "Stock"
-            df = pd.concat([etfs, equities]).reset_index()
-            df.rename(columns={df.columns[0]: "ticker"}, inplace=True)
-            for col in ["country","sector","name","category_group","category",
-                        "currency","yf_symbol","yf_suffix","isin"]:
-                if col not in df.columns:
-                    df[col] = ""
-            for col in df.columns:
-                if df[col].dtype == object:
-                    df[col] = df[col].fillna("").astype(str).str.strip()
-            df = df[df["ticker"].str.match(r"^[A-Z]{2,5}$")]
-            return df.drop_duplicates(subset=["ticker","type"], keep="first")
-        except Exception:
-            pass
-    return pd.DataFrame()
-
-@st.cache_data(ttl=3600)
-def load_justetf():
-    if not JUSTETF_AVAILABLE:
-        return pd.DataFrame()
+    """Load universe from Supabase."""
     try:
-        df = justetf_scraping.load_overview().reset_index()
-        col_map = {}
-        for c in df.columns:
-            cl = c.lower()
-            if cl == "ticker":                             col_map[c] = "ticker"
-            elif cl == "isin":                             col_map[c] = "isin"
-            elif "name" in cl and "index" not in cl:      col_map[c] = "jname"
-            elif "domicile" in cl:                         col_map[c] = "domicile"
-            elif cl in ("ter","expense_ratio"):            col_map[c] = "ter"
-            elif "distribution" in cl or "policy" in cl:  col_map[c] = "dist_policy"
-            elif "fund_size" in cl or "aum" in cl:        col_map[c] = "fund_size_eur"
-            elif "replication" in cl:                      col_map[c] = "replication"
-            elif "strategy" in cl:                         col_map[c] = "strategy"
-        df = df.rename(columns=col_map)
-        keep = [c for c in ["ticker","isin","jname","domicile","ter",
-                             "dist_policy","fund_size_eur","replication","strategy"]
-                if c in df.columns]
-        df = df[keep].copy()
-        if "dist_policy" not in df.columns and "jname" in df.columns:
-            def _infer_dist(name):
-                n = str(name).lower()
-                if any(x in n for x in [" acc","(acc)","accumulating","capitalisation"]):
-                    return "Accumulating"
-                if any(x in n for x in [" dist","(dist)"," inc","distributing","dividend"]):
-                    return "Distributing"
-                return "Accumulating"
-            df["dist_policy"] = df["jname"].apply(_infer_dist)
-        df["ticker"] = df["ticker"].fillna("").astype(str).str.strip().str.upper()
-        df = df[df["ticker"].str.match(r"^[A-Z0-9]{1,6}$")]
-        return df.drop_duplicates(subset=["ticker"], keep="first")
+        sb = _get_supabase()
+        if sb is None:
+            return pd.DataFrame()
+        rows = []
+        page, page_size = 0, 1000
+        while True:
+            res = sb.table("universe").select("*").range(page*page_size, (page+1)*page_size-1).execute()
+            if not res.data:
+                break
+            rows.extend(res.data)
+            if len(res.data) < page_size:
+                break
+            page += 1
+        if not rows:
+            return pd.DataFrame()
+        df = pd.DataFrame(rows)
+        for col in ["country","sector","name","category_group","category",
+                    "currency","yf_symbol","yf_suffix","isin"]:
+            if col not in df.columns:
+                df[col] = ""
+        for col in df.columns:
+            if df[col].dtype == object:
+                df[col] = df[col].fillna("").astype(str).str.strip()
+        df = df[df["ticker"].str.match(r"^[A-Z0-9]{2,6}$")]
+        return df.drop_duplicates(subset=["ticker","type"], keep="first")
     except Exception as e:
         return pd.DataFrame()
 
 @st.cache_data(ttl=3600)
-def load_signals():
-    path = _find_file("signals.csv")
-    if not path:
-        return pd.DataFrame()
+def load_justetf():
+    """Build justETF-style df from universe table (domicile/dist_policy/ter/replication/strategy)."""
     try:
-        df = pd.read_csv(path)
+        df = load_base_universe()
+        if df.empty:
+            return pd.DataFrame()
+        etfs = df[df["type"]=="ETF"].copy()
+        # Rename name -> jname for compatibility
+        if "name" in etfs.columns:
+            etfs = etfs.rename(columns={"name":"jname"})
+        keep = [c for c in ["ticker","isin","jname","domicile","ter",
+                             "dist_policy","fund_size_eur","replication","strategy"]
+                if c in etfs.columns]
+        return etfs[keep].drop_duplicates(subset=["ticker"], keep="first")
+    except Exception:
+        return pd.DataFrame()
+
+@st.cache_data(ttl=3600)
+def load_signals():
+    """Load signals from Supabase."""
+    try:
+        sb = _get_supabase()
+        if sb is None:
+            return pd.DataFrame()
+        rows = []
+        page, page_size = 0, 1000
+        while True:
+            res = sb.table("signals").select("*").range(page*page_size, (page+1)*page_size-1).execute()
+            if not res.data:
+                break
+            rows.extend(res.data)
+            if len(res.data) < page_size:
+                break
+            page += 1
+        if not rows:
+            return pd.DataFrame()
+        df = pd.DataFrame(rows)
         def _bad_ticker(t):
             t = str(t).strip()
             if len(t) < 2: return True
-            if t[-1] in ('W','U','R') and len(t) >= 4: return True
-            if t.endswith(('WS','WT','WI','WD')): return True
+            if t[-1] in ("W","U","R") and len(t) >= 4: return True
+            if t.endswith(("WS","WT","WI","WD")): return True
             return False
         df = df[~df["ticker"].apply(_bad_ticker)]
         if "name" in df.columns:
             spac_kw = ["acquisition corp","blank check","special purpose","spac"]
             lev_kw  = ["2x","3x","4x","-1x","-2x","-3x","leveraged","inverse daily","ultrashort"]
-            df = df[~df["name"].str.lower().apply(lambda n: any(k in n for k in spac_kw + lev_kw))]
+            df = df[~df["name"].str.lower().fillna("").apply(
+                lambda n: any(k in n for k in spac_kw + lev_kw))]
         if "price" in df.columns:
             df = df[(df["price"].isna()) | (df["price"] >= 1.00)]
         if "dist_ma200" in df.columns:
@@ -277,7 +262,7 @@ def load_signals():
             df = df.sort_values("score", ascending=False).drop_duplicates(
                 subset=["ticker"], keep="first").reset_index(drop=True)
         return df
-    except Exception:
+    except Exception as e:
         return pd.DataFrame()
 
 
