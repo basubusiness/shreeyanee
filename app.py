@@ -281,15 +281,25 @@ def load_signals():
         return pd.DataFrame()
 
 
-# Load globals once at startup
+# Load disk cache at startup (safe — no st calls)
 _load_disk_cache()
-universe  = load_base_universe()
-jetf_df   = load_justetf()
-signals_df_global = load_signals()   # use getter below so session can override
+
+# Lazy loaders — called inside Streamlit execution context, not at import time
+def get_universe():
+    if "universe" not in st.session_state:
+        st.session_state["universe"] = load_base_universe()
+    return st.session_state["universe"]
+
+def get_jetf_df():
+    if "jetf_df" not in st.session_state:
+        st.session_state["jetf_df"] = load_justetf()
+    return st.session_state["jetf_df"]
 
 def get_signals_df():
-    """Return signals_df, preferring session-level live-updated version."""
-    return st.session_state.get("signals_df", signals_df_global)
+    """Return signals_df — load from CSV on first call, prefer live session updates."""
+    if "signals_df" not in st.session_state:
+        st.session_state["signals_df"] = load_signals()
+    return st.session_state["signals_df"]
 
 def update_signals_df(new_row_dict, source_tab=None):
     """Write a fresh signal row into session-level signals_df.
@@ -303,21 +313,31 @@ def update_signals_df(new_row_dict, source_tab=None):
     if source_tab:
         st.session_state["_signals_updated_by"] = source_tab
 
-# Build name/ISIN lookup
-_name_lookup = {}
-if not universe.empty and "name" in universe.columns:
-    for _, row in universe.iterrows():
-        t = str(row.get("ticker","")).strip()
-        n = str(row.get("name","")).strip()
-        if t and n not in ("","nan","None"):
-            _name_lookup[t] = n
-if not jetf_df.empty:
-    for _, row in jetf_df.iterrows():
-        t = str(row.get("ticker","")).strip()
-        n = str(row.get("jname","")).strip()
-        i = str(row.get("isin","")).strip() if pd.notna(row.get("isin","")) else ""
-        if t and n not in ("","nan","None"):
-            _name_lookup[t] = (n, i)
+def _build_name_lookup():
+    lookup = {}
+    u = get_universe()
+    j = get_jetf_df()
+    if not u.empty and "name" in u.columns:
+        for _, row in u.iterrows():
+            t = str(row.get("ticker","")).strip()
+            n = str(row.get("name","")).strip()
+            if t and n not in ("","nan","None"):
+                lookup[t] = n
+    if not j.empty:
+        for _, row in j.iterrows():
+            t = str(row.get("ticker","")).strip()
+            n = str(row.get("jname","")).strip()
+            i = str(row.get("isin","")).strip() if pd.notna(row.get("isin","")) else ""
+            if t and n not in ("","nan","None"):
+                lookup[t] = (n, i)
+    return lookup
+
+def get_name_isin(ticker):
+    lookup = _build_name_lookup()
+    entry = lookup.get(ticker)
+    if isinstance(entry, tuple):
+        return entry[0], entry[1]
+    return entry or ticker, ""
 
 
 # ───────────────────────────────────────────────────────────────────
@@ -477,8 +497,8 @@ def fetch_ticker_data(ticker, isin=None, force_refresh=False):
         resolved_sym = cache_get(f"resolved_{ticker}")
         universe_sfx = None
 
-        if known_sfx is None and resolved_sym is None and not universe.empty and "yf_symbol" in universe.columns:
-            rows = universe[universe["ticker"] == ticker]
+        if known_sfx is None and resolved_sym is None and not get_universe().empty and "yf_symbol" in get_universe().columns:
+            rows = get_universe()[get_universe()["ticker"] == ticker]
             if not rows.empty:
                 yf_sym = str(rows.iloc[0].get("yf_symbol","")).strip()
                 yf_sfx = str(rows.iloc[0].get("yf_suffix","")).strip()
@@ -1061,8 +1081,8 @@ def build_tickers(preset_key, filters):
         # Primary: jetf_df (when justetf-scraping is installed)
         # Secondary: universe ETFs
         # Fallback: all ETF tickers already in signals.csv — always works on Community Cloud
-        src_df = (jetf_df if not jetf_df.empty
-                  else universe[universe["type"]=="ETF"] if not universe.empty
+        src_df = (get_jetf_df() if not get_jetf_df().empty
+                  else get_universe()[get_universe()["type"]=="ETF"] if not get_universe().empty
                   else pd.DataFrame())
 
         if not src_df.empty:
@@ -1088,15 +1108,15 @@ def build_tickers(preset_key, filters):
                 tickers += sdf["ticker"].dropna().str.upper().tolist()
 
     if ptype in ("Stock","custom"):
-        if not universe.empty:
-            mask = universe["type"] == "Stock"
-            if "country" in preset and "country" in universe.columns:
-                mask &= universe["country"].isin(preset["country"])
-            if filters.get("country") and "country" in universe.columns:
-                mask &= universe["country"].isin(filters["country"])
-            if filters.get("sector") and "sector" in universe.columns:
-                mask &= universe["sector"].isin(filters["sector"])
-            tickers += universe[mask]["ticker"].dropna().str.upper().tolist()
+        if not get_universe().empty:
+            mask = get_universe()["type"] == "Stock"
+            if "country" in preset and "country" in get_universe().columns:
+                mask &= get_universe()["country"].isin(preset["country"])
+            if filters.get("country") and "country" in get_universe().columns:
+                mask &= get_universe()["country"].isin(filters["country"])
+            if filters.get("sector") and "sector" in get_universe().columns:
+                mask &= get_universe()["sector"].isin(filters["sector"])
+            tickers += get_universe()[mask]["ticker"].dropna().str.upper().tolist()
 
     # Filter leveraged/SPAC/warrants
     def _is_bad(t):
@@ -1107,11 +1127,7 @@ def build_tickers(preset_key, filters):
     tickers = [t for t in dict.fromkeys(tickers) if not _is_bad(t)]
     return tickers[:5000]
 
-def get_name_isin(ticker):
-    entry = _name_lookup.get(ticker)
-    if isinstance(entry, tuple):
-        return entry[0], entry[1]
-    return entry or ticker, ""
+
 
 
 # ───────────────────────────────────────────────────────────────────
@@ -1183,9 +1199,9 @@ def render_sidebar():
             types = st.multiselect("Asset Type", ["ETF","Stock"], default=["ETF"])
             filters["types"] = types
         if ptype in ("ETF","custom"):
-            dom_opts  = sorted(jetf_df["domicile"].dropna().unique().tolist()) if not jetf_df.empty and "domicile" in jetf_df.columns else ["Ireland","Luxembourg","Germany","United States"]
-            dist_opts = sorted(jetf_df["dist_policy"].dropna().unique().tolist()) if not jetf_df.empty and "dist_policy" in jetf_df.columns else ["Accumulating","Distributing"]
-            repl_opts = sorted(jetf_df["replication"].dropna().unique().tolist()) if not jetf_df.empty and "replication" in jetf_df.columns else ["Physical (Full)","Physical (Sampling)","Swap-based"]
+            dom_opts  = sorted(get_jetf_df()["domicile"].dropna().unique().tolist()) if not jetf_df.empty and "domicile" in jetf_df.columns else ["Ireland","Luxembourg","Germany","United States"]
+            dist_opts = sorted(get_jetf_df()["dist_policy"].dropna().unique().tolist()) if not jetf_df.empty and "dist_policy" in jetf_df.columns else ["Accumulating","Distributing"]
+            repl_opts = sorted(get_jetf_df()["replication"].dropna().unique().tolist()) if not jetf_df.empty and "replication" in jetf_df.columns else ["Physical (Full)","Physical (Sampling)","Swap-based"]
             st.markdown("**📦 ETF Filters**")
             filters["domicile"]     = st.multiselect("Domicile",     dom_opts)
             filters["dist_policy"]  = st.multiselect("Distribution", dist_opts)
@@ -1194,9 +1210,9 @@ def render_sidebar():
             filters["max_ter"]      = st.number_input("Max TER %",   min_value=0.0, max_value=5.0, value=2.0, step=0.05)
         if ptype in ("Stock","custom"):
             st.markdown("**📈 Stock Filters**")
-            if not universe.empty:
-                ctry_opts = sorted(universe[universe["type"]=="Stock"]["country"].dropna().unique().tolist())
-                sect_opts = sorted(universe[universe["type"]=="Stock"]["sector"].dropna().unique().tolist())
+            if not get_universe().empty:
+                ctry_opts = sorted(get_universe()[get_universe()["type"]=="Stock"]["country"].dropna().unique().tolist())
+                sect_opts = sorted(get_universe()[get_universe()["type"]=="Stock"]["sector"].dropna().unique().tolist())
             else:
                 ctry_opts, sect_opts = [], []
             filters["country"] = st.multiselect("Country", ctry_opts)
@@ -1416,8 +1432,8 @@ def render_deepdive(budget):
     if len(ticker) == 12 and ticker[:2].isalpha():
         isin = ticker
         # Look up in justETF
-        if not jetf_df.empty and "isin" in jetf_df.columns:
-            match = jetf_df[jetf_df["isin"] == isin]
+        if not get_jetf_df().empty and "isin" in get_jetf_df().columns:
+            match = get_jetf_df()[get_jetf_df()["isin"] == isin]
             if not match.empty:
                 ticker = match.iloc[0]["ticker"]
 
@@ -1438,7 +1454,7 @@ def render_deepdive(budget):
 
     name, isin_found = get_name_isin(ticker)
     isin = isin or isin_found
-    is_etf = not universe.empty and ticker in universe[universe["type"]=="ETF"]["ticker"].values
+    is_etf = not get_universe().empty and ticker in get_universe()[get_universe()["type"]=="ETF"]["ticker"].values
 
     # Fundamentals
     fund_data = {}
@@ -1481,8 +1497,8 @@ def render_deepdive(budget):
 
     # justETF metadata
     jetf_meta = {}
-    if not jetf_df.empty and "ticker" in jetf_df.columns and ticker in jetf_df["ticker"].values:
-        jetf_meta = jetf_df[jetf_df["ticker"]==ticker].iloc[0].to_dict()
+    if not get_jetf_df().empty and "ticker" in get_jetf_df().columns and ticker in get_jetf_df()["ticker"].values:
+        jetf_meta = get_jetf_df()[get_jetf_df()["ticker"]==ticker].iloc[0].to_dict()
 
     # ETF category flags
     HARD_FLAG_KW = ["leveraged","2x ","3x ","4x ","-2x","-3x"," short ","inverse"]
