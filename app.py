@@ -162,7 +162,7 @@ def _load_disk_cache():
 # UNIVERSE LOADERS  (cached globally — loaded once)
 # ───────────────────────────────────────────────────────────────────
 
-@st.cache_resource
+@st.cache_data(ttl=3600)
 def load_base_universe():
     csv_path = os.path.join(os.path.dirname(__file__), "universe.csv")
     if os.path.exists(csv_path):
@@ -201,7 +201,7 @@ def load_base_universe():
             pass
     return pd.DataFrame()
 
-@st.cache_resource
+@st.cache_data(ttl=3600)
 def load_justetf():
     if not JUSTETF_AVAILABLE:
         return pd.DataFrame()
@@ -239,7 +239,7 @@ def load_justetf():
     except Exception as e:
         return pd.DataFrame()
 
-@st.cache_resource
+@st.cache_data(ttl=3600)
 def load_signals():
     path = os.path.join(os.path.dirname(__file__), "signals.csv")
     if not os.path.exists(path):
@@ -1193,8 +1193,6 @@ def render_sidebar():
     st.sidebar.divider()
 
     budget  = st.sidebar.number_input("💰 Monthly Budget (EUR)", min_value=100, value=1000, step=100)
-    workers = st.sidebar.slider("⚡ Parallel Workers", min_value=2, max_value=12, value=6)
-    fetch_pe = st.sidebar.checkbox("Fetch PE / Fundamentals (slower)")
 
     tickers = build_tickers(preset, filters)
     st.sidebar.caption(f"{len(tickers):,} tickers in scope")
@@ -1211,14 +1209,14 @@ def render_sidebar():
 - 55–100 → Greed/Extreme Greed 🟢💚 *(caution)*
         """)
 
-    return preset, filters, budget, workers, fetch_pe, tickers, vix, fg, rm
+    return preset, filters, budget, tickers, vix, fg, rm
 
 
 # ───────────────────────────────────────────────────────────────────
 # TAB 1 — MARKET SCANNER
 # ───────────────────────────────────────────────────────────────────
 
-def render_scanner(tickers, budget, workers, fetch_pe, vix, fg, rm):
+def render_scanner(tickers, budget, vix, fg, rm):
     st.subheader("🔭 Market Scanner")
 
     c1, c2 = st.columns([5,1])
@@ -1807,7 +1805,7 @@ def render_value_screen():
 # ───────────────────────────────────────────────────────────────────
 
 def main():
-    preset, filters, budget, workers, fetch_pe, tickers, vix, fg, rm = render_sidebar()
+    preset, filters, budget, tickers, vix, fg, rm = render_sidebar()
 
     tab_scanner, tab_deepdive, tab_value = st.tabs([
         "🔭 Market Scanner",
@@ -1816,7 +1814,7 @@ def main():
     ])
 
     with tab_scanner:
-        render_scanner(tickers, budget, workers, fetch_pe, vix, fg, rm)
+        render_scanner(tickers, budget, vix, fg, rm)
 
     with tab_deepdive:
         render_deepdive(budget)
