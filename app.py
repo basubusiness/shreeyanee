@@ -75,6 +75,13 @@ header [data-testid="stToolbar"] { visibility: visible !important; }
 [data-testid="collapsedControl"] { display: flex !important; visibility: visible !important; }
 section[data-testid="stSidebar"] { display: block !important; }
 
+/* Fix tab click area — Streamlit tabs have an inner p tag that blocks clicks */
+[data-baseweb="tab"] { cursor: pointer !important; }
+[data-baseweb="tab"] * { pointer-events: none !important; }
+[data-baseweb="tab-list"] button { cursor: pointer !important; }
+/* Ensure the top-level tab container catches all clicks */
+[data-testid="stTabs"] [role="tab"] { cursor: pointer !important; position: relative !important; z-index: 1 !important; }
+
 /* Metric cards */
 [data-testid="metric-container"] {
     background: #fff;
@@ -1408,16 +1415,14 @@ def build_result_df(sig, budget, fg, rm):
 
 
 def _show_strategy_table(df, label, color, empty_msg):
-    """Render a strategy sub-table with checkbox Deep Dive and consistent styling."""
+    """Render a strategy sub-table with Deep Dive button above table."""
     if df.empty:
         st.info(empty_msg)
         return
 
     display = [c for c in df.columns if not c.startswith("_")]
-
-    # Add a Select column for Deep Dive — vectorised, no loop
     df_edit = df[display].copy()
-    df_edit.insert(0, "🔬", False)   # checkbox column
+    df_edit.insert(0, "🔬", False)
 
     def _style(val):
         colors = {"BUY":"#0d9488","WATCH":"#0284c7","SELL":"#dc2626","AVOID":"#d97706"}
@@ -1432,9 +1437,13 @@ def _show_strategy_table(df, label, color, empty_msg):
 
     style_cols = [c for c in ["Signal","Grade","MACD","Risk"] if c in display]
 
+    # ── Dive button placeholder sits ABOVE the table ──────────────────
+    dive_area = st.empty()
+    dive_area.caption("💡 Tick the 🔬 checkbox on any row then click Deep Dive.")
+
     edited = st.data_editor(
         df_edit,
-        column_config={"🔬": st.column_config.CheckboxColumn("🔬 Dive", help="Tick to Deep Dive", width="small")},
+        column_config={"🔬": st.column_config.CheckboxColumn("🔬", help="Tick to Deep Dive", width="small")},
         disabled=[c for c in df_edit.columns if c != "🔬"],
         use_container_width=True,
         height=min(500, 45 + len(df_edit)*35),
@@ -1442,14 +1451,16 @@ def _show_strategy_table(df, label, color, empty_msg):
         key=f"tbl_{label}",
     )
 
-    # Deep Dive trigger — vectorised check, instant
     selected = edited[edited["🔬"] == True]
     if not selected.empty:
         ticker = selected.iloc[0]["Ticker"]
-        if st.button(f"🔬 Deep Dive on {ticker}", type="primary", key=f"dive_{label}_{ticker}"):
-            st.session_state["dd_ticker"] = ticker
-            st.session_state["dd_auto"]   = True
-            st.rerun()
+        # Replace hint with the actual button above the table
+        with dive_area:
+            if st.button(f"🔬 Deep Dive: {ticker}", type="primary",
+                         key=f"dive_{label}_{ticker}", use_container_width=True):
+                st.session_state["dd_ticker"] = ticker
+                st.session_state["dd_auto"]   = True
+                st.rerun()
 
     csv = df[display].to_csv(index=False).encode("utf-8")
     st.download_button(f"⬇️ Download {label}", csv,
