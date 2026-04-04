@@ -1253,9 +1253,46 @@ def classify_strategies(s):
     atype = s.get("type","").fillna("").astype(str) if "type" in s.columns else pd.Series([""]*len(s))
     action= s.get("action","WAIT").fillna("WAIT").astype(str)
 
-    # 🟡 CORE — ETFs with a dip signal (timing plays)
+    # 🟡 CORE — ETF + stock timing signals, risk-tiered
     is_etf  = atype.str.upper() == "ETF"
-    is_core = is_etf & action.isin(["BUY","WATCH"]) & (dm < -5)
+
+    # ── CORE risk tier classification ─────────────────────────────────
+    # Keywords that indicate speculative / volatile ETFs
+    name_col = s.get("name", pd.Series([""]*len(s))).fillna("").str.lower() if "name" in s.columns else pd.Series([""]*len(s))
+    strat_col = s.get("strategy", pd.Series([""]*len(s))).fillna("").str.lower() if "strategy" in s.columns else pd.Series([""]*len(s))
+    combined_name = name_col + " " + strat_col
+
+    speculative_kw = ["crypto","bitcoin","blockchain","ethereum","nuclear","uranium",
+                      "leverage","inverse","short","3x","2x","volatil","ark ",
+                      "cannabis","marijuana","gaming","esport","space","metaverse"]
+    sector_kw      = ["tech","cyber","security","health","pharma","biotech","energy",
+                      "clean","solar","wind","real estate","reit","financial","bank",
+                      "india","china","emerging","asia","latin","africa","korea"]
+
+    ter_col  = pd.to_numeric(s.get("ter",  pd.Series([np.nan]*len(s))), errors="coerce")
+    aum_col  = pd.to_numeric(s.get("fund_size_eur", pd.Series([np.nan]*len(s))), errors="coerce")
+
+    is_speculative_etf = is_etf & (
+        combined_name.apply(lambda n: any(kw in n for kw in speculative_kw)) |
+        (ter_col > 0.50) |
+        (aum_col < 100)
+    )
+    is_sector_etf = is_etf & ~is_speculative_etf & (
+        combined_name.apply(lambda n: any(kw in n for kw in sector_kw))
+    )
+    is_steady_etf = is_etf & ~is_speculative_etf & ~is_sector_etf
+
+    # Stocks in CORE = always speculative (pure technical, no fundamental check)
+    is_stock_core = (~is_etf) & action.isin(["BUY","WATCH"]) & (dm < -5)
+
+    # Risk tier labels
+    core_risk = np.where(is_steady_etf,      "🟢 Steady",
+                np.where(is_sector_etf,      "🟡 Sector",
+                np.where(is_speculative_etf, "🔴 Speculative",
+                np.where(is_stock_core,      "🔴 Speculative (Stock)",
+                ""))))
+
+    is_core = (is_etf | is_stock_core) & action.isin(["BUY","WATCH"]) & (dm < -5)
 
     # ── Has fundamental data? ─────────────────────────────────────────
     has_fund  = rev_g.notna() | roe.notna()   # at least one fundamental present
@@ -1301,6 +1338,7 @@ def classify_strategies(s):
 
     s = s.copy()
     s["is_core"]      = is_core.values
+    s["core_risk"]    = core_risk
     s["is_value"]     = is_value.values
     s["is_momentum"]  = is_momentum.values
     s["is_darkhorse"] = is_darkhorse.values
@@ -1337,7 +1375,8 @@ def build_result_df(sig, budget, fg, rm):
     vg  = s.get("value_grade","—").fillna("—").astype(str) if "value_grade" in s.columns else pd.Series(["—"]*len(s))
     rg  = pd.to_numeric(s.get("rev_growth", pd.Series([np.nan]*len(s))), errors="coerce")
     rg_str = (rg*100).round(0).astype("Int64").astype(str).replace("<NA>","—") + "% rev"
-    driver = np.where(s.get("is_core",  False), "ETF dip opportunity",
+    core_risk_col = s.get("core_risk", pd.Series([""]*len(s))).fillna("").astype(str)
+    driver = np.where(s.get("is_core",  False), "ETF dip · " + core_risk_col,
              np.where(s.get("is_value", False), "Oversold + Grade " + vg.values,
              np.where(s.get("is_momentum",False), "Momentum + " + rg_str.values,
              np.where(s.get("is_darkhorse",False), "Dark horse + " + rg_str.values,
@@ -1358,6 +1397,7 @@ def build_result_df(sig, budget, fg, rm):
         "Driver":   driver,
         "Knife":    np.where((pd.to_numeric(s.get("is_knife",0),errors="coerce").fillna(0)>0)&
                              (pd.to_numeric(s.get("reversal",0),errors="coerce").fillna(0)==0),"⚠️",""),
+        "Risk":     s.get("core_risk", pd.Series([""]*len(s))).fillna("").astype(str),
         # strategy flags (hidden, used for filtering)
         "_core":      s.get("is_core",      pd.Series([False]*len(s))).values,
         "_value":     s.get("is_value",     pd.Series([False]*len(s))).values,
@@ -1424,8 +1464,20 @@ def render_scanner(tickers, budget, vix, fg, rm):
             st.warning("No signals found.")
             return
         with st.spinner(f"⚡ Classifying {len(sig):,} signals…"):
-            sig = classify_strategies(sig)
-            result_df = build_result_df(sig, budget, fg, rm)
+            # For CORE (ETF timing): always use full signals regardless of preset
+            # so ETF dip signals show even when a stock preset is selected
+            full_sdf = sdf.copy()
+            etf_sig  = full_sdf[full_sdf.get("type", pd.Series([""] * len(full_sdf))).str.upper() == "ETF"].copy() if "type" in full_sdf.columns else pd.DataFrame()
+            # Classify the preset-filtered signals (stocks or ETFs per preset)
+            sig_classified = classify_strategies(sig)
+            # Classify ETFs from full universe separately, merge CORE flag in
+            if not etf_sig.empty:
+                etf_classified = classify_strategies(etf_sig)
+                etf_core = etf_classified[etf_classified["is_core"]].copy()
+                # Remove any ETFs already in sig_classified, add CORE ETFs back
+                non_etf = sig_classified[~sig_classified.get("is_core", pd.Series([False]*len(sig_classified))).values]
+                sig_classified = pd.concat([etf_core, non_etf], ignore_index=True)
+            result_df = build_result_df(sig_classified, budget, fg, rm)
             computed = sig["computed_at"].iloc[0] if "computed_at" in sig.columns else "unknown"
             st.session_state["scan_results"] = result_df
             st.session_state["scan_status"]  = (
@@ -1452,33 +1504,85 @@ def render_scanner(tickers, budget, vix, fg, rm):
 
     # ── Strategy KPI row ─────────────────────────────────────────────
     k1,k2,k3,k4 = st.columns(4)
-    k1.metric("🟡 CORE",       int(result_df["_core"].sum()))
-    k2.metric("🔵 VALUE",      int(result_df["_value"].sum()))
-    k3.metric("🔴 MOMENTUM",   int(result_df["_momentum"].sum()))
-    k4.metric("⚡ DARK HORSE", int(result_df["_darkhorse"].sum()))
+    k1.metric("🟡 CORE — ETF dips",      int(result_df["_core"].sum()))
+    k2.metric("🔵 VALUE — Quality dips",  int(result_df["_value"].sum()))
+    k3.metric("🔴 MOMENTUM — Runners",    int(result_df["_momentum"].sum()))
+    k4.metric("⚡ DARK HORSE — Hidden",   int(result_df["_darkhorse"].sum()))
 
     # ── Strategy tabs ────────────────────────────────────────────────
     tab_core, tab_value, tab_mom, tab_dh, tab_live = st.tabs([
-        "🟡 CORE", "🔵 VALUE", "🔴 MOMENTUM", "⚡ DARK HORSE", "🎯 LIVE DECISION"
+        "🟡 CORE — ETF Timing",
+        "🔵 VALUE — Quality Dips",
+        "🔴 MOMENTUM — Buy Strength",
+        "⚡ DARK HORSE — Hidden Growth",
+        "🎯 LIVE DECISION",
     ])
 
     with tab_core:
-        st.caption("ETF timing — accumulate on dips, trim on highs. Capital preservation + compounding.")
+        st.caption("Timing signals for ETFs and stocks — sorted by risk level. Best suited for ETF accumulation.")
         with st.expander("ℹ️ How does this work?", expanded=False):
             st.markdown(
-                "**What this tab shows:** ETFs that have dropped significantly from their long-term average and show early recovery signs.\n\n"
-                "**Why ETFs?** They track hundreds of stocks so a dip is usually a market overreaction, not a business failure.\n\n"
+                "**What this tab shows:** Assets (mainly ETFs) that have dipped and are showing early recovery signs — "
+                "sorted by risk level so you know what you're getting into.\n\n"
+                "**The Risk column tells you everything:**\n"
+                "- 🟢 **Steady** — broad diversified ETFs (world index, S&P 500, bonds). "
+                "A dip here is almost always a mean-reversion opportunity. Lowest risk.\n"
+                "- 🟡 **Sector** — sector or country ETFs (tech, healthcare, India, emerging markets). "
+                "Still diversified within the theme, but more concentrated. Moderate risk.\n"
+                "- 🔴 **Speculative** — crypto ETFs, niche themes (nuclear, gaming, ARK-style), "
+                "high-TER or small funds, and individual stocks. "
+                "Same dip signal, but the underlying assets can stay down or go to zero. Tread carefully.\n\n"
                 "**To qualify:** Price 5%+ below 200-day average · RSI under 48 · MACD turning bullish.\n\n"
-                "**Dist%** = how far below the 200-day average (more negative = bigger dip). "
-                "**RSI** = 0–100 oversold meter, below 30 = very oversold. "
-                "**MACD ▲** = momentum turning positive. "
-                "**Alloc** = suggested amount from your monthly budget.\n\n"
-                "**What to do:** Use these to decide *when* to top up existing ETF positions, not *whether* to own them."
+                "**Columns:** Dist% = how far below long-term average · RSI = oversold meter (lower = more oversold) · "
+                "MACD ▲ = selling pressure easing · Alloc = suggested amount from your budget.\n\n"
+                "**What to do:** Focus on 🟢 Steady first. Use 🟡 Sector for tactical bets. "
+                "Treat 🔴 Speculative as high-risk opportunities — smaller position sizes, more monitoring."
             )
-        df_core = result_df[result_df["_core"]].sort_values("Score", ascending=False).reset_index(drop=True)
-        df_core.insert(0,"#",range(1,len(df_core)+1))
-        _show_strategy_table(df_core, "CORE ETFs", "#f59e0b",
-            "No ETF dip signals in current universe. Try 'All ETFs' preset.")
+        df_core = result_df[result_df["_core"]].copy()
+        if not df_core.empty:
+            # Sort: Steady first, then Sector, then Speculative — within each by Score desc
+            risk_order = {"🟢 Steady": 0, "🟡 Sector": 1,
+                          "🔴 Speculative": 2, "🔴 Speculative (Stock)": 3, "": 4}
+            df_core["_risk_n"] = df_core["Risk"].map(risk_order).fillna(4)
+            df_core = df_core.sort_values(["_risk_n","Score"], ascending=[True,False]).drop(columns=["_risk_n"]).reset_index(drop=True)
+            df_core.insert(0,"#",range(1,len(df_core)+1))
+
+            # Warning banner before speculative rows
+            n_steady = (df_core["Risk"]=="🟢 Steady").sum()
+            n_sector = (df_core["Risk"]=="🟡 Sector").sum()
+            n_spec   = df_core["Risk"].str.startswith("🔴").sum()
+            col1,col2,col3 = st.columns(3)
+            col1.metric("🟢 Steady ETFs",    n_steady)
+            col2.metric("🟡 Sector ETFs",    n_sector)
+            col3.metric("🔴 Speculative",    n_spec)
+
+            if n_spec > 0:
+                st.warning("⚠️ **Speculative signals included** — crypto ETFs, niche themes, and individual stocks "
+                           "appear at the bottom of the table. These carry significantly higher risk than broad ETFs. "
+                           "The same dip signal does not guarantee the same recovery.")
+
+            def _style_core(val):
+                if val == "🟢 Steady":   return "color:#0d9488;font-weight:700;"
+                if val == "🟡 Sector":   return "color:#d97706;font-weight:600;"
+                if str(val).startswith("🔴"): return "color:#dc2626;font-weight:600;"
+                colors = {"BUY":"#0d9488","WATCH":"#0284c7","SELL":"#dc2626","AVOID":"#d97706"}
+                if val in colors: return f"color:{colors[val]};font-weight:600;"
+                if val == "▲": return "color:#0d9488;"
+                if val == "▼": return "color:#dc2626;"
+                return ""
+
+            display = [c for c in df_core.columns if not c.startswith("_")]
+            style_cols = [c for c in ["Signal","Risk","MACD"] if c in display]
+            st.dataframe(
+                df_core[display].style.applymap(_style_core, subset=style_cols),
+                use_container_width=True,
+                height=min(500, 45 + len(df_core)*35),
+                hide_index=True,
+            )
+            csv = df_core[display].to_csv(index=False).encode("utf-8")
+            st.download_button("⬇️ Download CORE signals", csv, "core_signals.csv", "text/csv", key="dl_core")
+        else:
+            st.info("No CORE signals found. Run scan with any preset — CORE always loads ETF signals from the full database.")
 
     with tab_value:
         st.caption("Undervalued quality stocks — mean reversion play. Higher win rate, slower returns.")
