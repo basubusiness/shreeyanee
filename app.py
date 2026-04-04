@@ -1245,38 +1245,40 @@ def classify_strategies(s):
     is_core = is_etf & action.isin(["BUY","WATCH"]) & (dm < -5)
 
     # 🔵 VALUE — stocks: oversold + quality fundamentals
-    is_stock = ~is_etf
-    grade_ok = vg.isin(["A","B"])
-    roe_ok   = roe.isna() | (roe > 0.10)   # >10% ROE or no data (graceful)
-    rev_ok   = rev_g.isna() | (rev_g > 0)  # positive revenue growth or no data
-    is_value = (is_stock
-                & (dm < -10)
-                & (rsi < 48)
-                & (mb > 0)
-                & grade_ok
-                & roe_ok
-                & rev_ok
-                & action.isin(["BUY","WATCH"]))
+    # All conditions must have actual data — missing data = not classified
+    is_stock  = ~is_etf
+    grade_ok  = vg.isin(["A","B"])
+    roe_ok    = roe > 0.10                          # require actual ROE data
+    rev_ok    = rev_g > 0                           # require positive revenue growth data
+    is_value  = (is_stock
+                 & (dm < -10)
+                 & (rsi < 48)
+                 & (mb > 0)
+                 & grade_ok
+                 & roe_ok
+                 & rev_ok
+                 & action.isin(["BUY","WATCH"]))
 
     # 🔴 MOMENTUM — stocks: running with strong growth
-    rev_high = rev_g.isna() | (rev_g > 0.20)   # >20% rev growth or no data
+    # Require actual revenue growth data > 20%
+    rev_high    = rev_g > 0.20
     is_momentum = (is_stock
-                   & (dm > -5)          # near or above MA200
+                   & (dm > -5)
                    & (rsi >= 50) & (rsi <= 72)
                    & (mb > 0)
                    & rev_high
                    & action.isin(["BUY","WATCH","SELL"]))
 
-    # ⚡ DARK HORSE — stocks: beaten down but high growth potential
-    # Opposite of momentum — price weak but business strong
-    rev_pos  = rev_g.isna() | (rev_g > 0.15)   # >15% rev growth or no data
-    rsi_rec  = (rsi >= 28) & (rsi < 48)         # oversold but recovering
+    # ⚡ DARK HORSE — beaten down but confirmed high growth
+    # Require actual revenue growth data > 15% — no data = not a dark horse
+    rev_pos      = rev_g > 0.15
+    rsi_rec      = (rsi >= 28) & (rsi < 48)
     is_darkhorse = (is_stock
-                    & (dm < -15)         # significantly below MA200
+                    & (dm < -15)
                     & rsi_rec
-                    & (mb > 0)           # MACD turning
+                    & (mb > 0)
                     & rev_pos
-                    & ~grade_ok          # NOT already value-grade A/B — true dark horses
+                    & ~grade_ok              # not already value-grade A/B
                     & action.isin(["BUY","WATCH"]))
 
     # De-duplicate: if stock qualifies for both value and darkhorse → value wins
