@@ -14,7 +14,7 @@ import json
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, timezone
 
 try:
     import justetf_scraping
@@ -35,7 +35,7 @@ except ImportError:
     PDR_AVAILABLE = False
 
 APP_VERSION = "v11.0"
-BUILD_TIME = datetime.utcnow().strftime("%d %b %H:%M UTC")
+BUILD_TIME = datetime.now(timezone.utc).strftime("%d %b %H:%M UTC")
 
 # ───────────────────────────────────────────────────────────────────
 # PAGE CONFIG
@@ -224,45 +224,26 @@ def load_justetf():
 
 @st.cache_data(ttl=3600)
 def load_signals():
-    """Load signals from Supabase."""
+    """Load signals from Supabase — single request, no pagination."""
     try:
         sb = _get_supabase()
         if sb is None:
             return pd.DataFrame()
-        rows = []
-        page, page_size = 0, 1000
-        while True:
-            # Only fetch actionable signals — WAIT/AVOID rows not needed for scanner display
-            res = (sb.table("signals")
-                     .select("*")
-                     .in_("action", ["BUY","WATCH","SELL","AVOID"])
-                     .range(page*page_size, (page+1)*page_size-1)
-                     .execute())
-            if not res.data:
-                break
-            rows.extend(res.data)
-            if len(res.data) < page_size:
-                break
-            page += 1
-        if not rows:
+        # Single request — Supabase default limit is 1000 rows
+        # Use limit(5000) to get all rows in one call
+        res = (sb.table("signals")
+                 .select("ticker,action,score,price,ma200,dist_ma200,rsi,rsi_rising,"
+                         "macd_bull,macd_accel,vol_pct,conf,is_knife,reversal,"
+                         "dist_52w,pe_ratio,div_yield,market_cap,beta,value_score,"
+                         "value_grade,name,isin,type,country,sector,domicile,"
+                         "dist_policy,ter,fund_size_eur,replication,strategy,"
+                         "data_source,computed_at")
+                 .neq("action", "WAIT")
+                 .limit(5000)
+                 .execute())
+        if not res.data:
             return pd.DataFrame()
-        df = pd.DataFrame(rows)
-        def _bad_ticker(t):
-            t = str(t).strip()
-            if len(t) < 2: return True
-            if t[-1] in ("W","U","R") and len(t) >= 4: return True
-            if t.endswith(("WS","WT","WI","WD")): return True
-            return False
-        df = df[~df["ticker"].apply(_bad_ticker)]
-        if "name" in df.columns:
-            spac_kw = ["acquisition corp","blank check","special purpose","spac"]
-            lev_kw  = ["2x","3x","4x","-1x","-2x","-3x","leveraged","inverse daily","ultrashort"]
-            df = df[~df["name"].str.lower().fillna("").apply(
-                lambda n: any(k in n for k in spac_kw + lev_kw))]
-        if "price" in df.columns:
-            df = df[(df["price"].isna()) | (df["price"] >= 1.00)]
-        if "dist_ma200" in df.columns:
-            df = df[(df["dist_ma200"].isna()) | (df["dist_ma200"] > -95)]
+        df = pd.DataFrame(res.data)
         if "score" in df.columns:
             df = df.sort_values("score", ascending=False).drop_duplicates(
                 subset=["ticker"], keep="first").reset_index(drop=True)
