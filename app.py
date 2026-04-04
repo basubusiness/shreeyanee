@@ -229,27 +229,40 @@ def load_justetf():
     except Exception:
         return pd.DataFrame()
 
+SIGNALS_COLS = (
+    "ticker,action,score,price,ma200,dist_ma200,rsi,rsi_rising,"
+    "macd_bull,macd_accel,vol_pct,conf,is_knife,reversal,"
+    "dist_52w,pe_ratio,div_yield,market_cap,beta,value_score,"
+    "value_grade,name,isin,type,country,sector,domicile,"
+    "dist_policy,ter,fund_size_eur,replication,strategy,"
+    "roe,rev_growth,debt_equity,fcf_yield,peg,"
+    "data_source,computed_at"
+)
+
 @st.cache_data(ttl=3600)
 def load_signals():
-    """Load signals from Supabase — single request, no pagination."""
+    """Load all signals from Supabase with pagination."""
     try:
         sb = _get_supabase()
         if sb is None:
             return pd.DataFrame()
-        # Fetch all signals — strategy classifier handles filtering
-        res = (sb.table("signals")
-                 .select("ticker,action,score,price,ma200,dist_ma200,rsi,rsi_rising,"
-                         "macd_bull,macd_accel,vol_pct,conf,is_knife,reversal,"
-                         "dist_52w,pe_ratio,div_yield,market_cap,beta,value_score,"
-                         "value_grade,name,isin,type,country,sector,domicile,"
-                         "dist_policy,ter,fund_size_eur,replication,strategy,"
-                         "roe,rev_growth,debt_equity,fcf_yield,peg,"
-                         "data_source,computed_at")
-                 .limit(10000)
-                 .execute())
-        if not res.data:
+        rows = []
+        page_size = 1000
+        page = 0
+        while True:
+            res = (sb.table("signals")
+                     .select(SIGNALS_COLS)
+                     .range(page * page_size, (page + 1) * page_size - 1)
+                     .execute())
+            if not res.data:
+                break
+            rows.extend(res.data)
+            if len(res.data) < page_size:
+                break
+            page += 1
+        if not rows:
             return pd.DataFrame()
-        df = pd.DataFrame(res.data)
+        df = pd.DataFrame(rows)
         if "score" in df.columns:
             df = df.sort_values("score", ascending=False).drop_duplicates(
                 subset=["ticker"], keep="first").reset_index(drop=True)
@@ -1244,24 +1257,27 @@ def classify_strategies(s):
     is_etf  = atype.str.upper() == "ETF"
     is_core = is_etf & action.isin(["BUY","WATCH"]) & (dm < -5)
 
-    # 🔵 VALUE — stocks: oversold + quality fundamentals
-    # All conditions must have actual data — missing data = not classified
+    # ── Has fundamental data? ─────────────────────────────────────────
+    has_fund  = rev_g.notna() | roe.notna()   # at least one fundamental present
+    has_rev   = rev_g.notna()
+    has_roe   = roe.notna()
+
     is_stock  = ~is_etf
     grade_ok  = vg.isin(["A","B"])
-    roe_ok    = roe > 0.10                          # require actual ROE data
-    rev_ok    = rev_g > 0                           # require positive revenue growth data
-    is_value  = (is_stock
-                 & (dm < -10)
-                 & (rsi < 48)
-                 & (mb > 0)
-                 & grade_ok
-                 & roe_ok
-                 & rev_ok
-                 & action.isin(["BUY","WATCH"]))
 
-    # 🔴 MOMENTUM — stocks: running with strong growth
-    # Require actual revenue growth data > 20%
-    rev_high    = rev_g > 0.20
+    # 🔵 VALUE — two tiers:
+    # Tier 1 (full): oversold + Grade A/B + ROE >10% + positive revenue growth
+    # Tier 2 (tech-only): oversold + strong technicals when fundamentals missing
+    roe_ok   = has_roe & (roe > 0.10)
+    rev_ok   = has_rev & (rev_g > 0)
+    value_full = (is_stock & (dm < -10) & (rsi < 48) & (mb > 0)
+                  & grade_ok & roe_ok & rev_ok & action.isin(["BUY","WATCH"]))
+    value_tech = (is_stock & (dm < -15) & (rsi < 40) & (mb > 0)
+                  & ~has_fund & action.isin(["BUY","WATCH"]))
+    is_value   = value_full | value_tech
+
+    # 🔴 MOMENTUM — require actual revenue growth >20%
+    rev_high    = has_rev & (rev_g > 0.20)
     is_momentum = (is_stock
                    & (dm > -5)
                    & (rsi >= 50) & (rsi <= 72)
@@ -1269,16 +1285,15 @@ def classify_strategies(s):
                    & rev_high
                    & action.isin(["BUY","WATCH","SELL"]))
 
-    # ⚡ DARK HORSE — beaten down but confirmed high growth
-    # Require actual revenue growth data > 15% — no data = not a dark horse
-    rev_pos      = rev_g > 0.15
+    # ⚡ DARK HORSE — require actual revenue growth >15%
+    rev_pos      = has_rev & (rev_g > 0.15)
     rsi_rec      = (rsi >= 28) & (rsi < 48)
     is_darkhorse = (is_stock
                     & (dm < -15)
                     & rsi_rec
                     & (mb > 0)
                     & rev_pos
-                    & ~grade_ok              # not already value-grade A/B
+                    & ~grade_ok
                     & action.isin(["BUY","WATCH"]))
 
     # De-duplicate: if stock qualifies for both value and darkhorse → value wins
