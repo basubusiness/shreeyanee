@@ -1,7 +1,18 @@
-streamlit==1.36.0
-pandas==2.2.2
-numpy==1.26.4
-yfinance==0.2.40
-requests==2.32.3
-scipy==1.13.1
-plotly==5.22.0
+streamlit>=1.35.0
+pandas>=2.0.0
+numpy>=1.26.0
+plotly>=5.20.0
+yfinance>=0.2.40
+requests>=2.31.0
+
+# Price data sources
+pandas-datareader>=0.10.0   # Stooq fallback
+
+# Universe data
+financedatabase>=2.2.0      # ETF/stock universe (fallback if no universe.csv)
+
+# ETF metadata + price history
+justetf-scraping>=0.3.0     # UCITS ETF data
+
+# Optional: OpenBB (heavy — only add if you want it as a price source)
+# openbb>=4.0.0
