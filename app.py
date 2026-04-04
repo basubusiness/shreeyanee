@@ -253,8 +253,15 @@ def load_justetf():
 
 @st.cache_data(ttl=3600)
 def load_signals():
+    import glob as _glob
+    cwd      = os.getcwd()
+    file_dir = os.path.dirname(os.path.abspath(__file__))
+    csvs     = _glob.glob("**/*.csv", recursive=True)[:6]
+    dbg = "cwd=" + cwd + " | dir=" + file_dir + " | csvs=" + str(csvs)
+    st.sidebar.caption(dbg)
     path = _find_file("signals.csv")
     if not path:
+        st.sidebar.error("signals.csv not found. " + dbg)
         return pd.DataFrame()
     try:
         df = pd.read_csv(path)
