@@ -747,7 +747,7 @@ def analyse_ticker(ticker, risk_mult=1.0, isin=None):
         "conf": raw["confidence"], "action": action, "score": score,
         "is_knife": int(is_knife), "reversal": int(reversal),
         "computed_at": date.today().isoformat(),
-    })
+    }, source_tab="scanner")
     return row
 
 
@@ -1743,6 +1743,11 @@ def render_scanner(tickers, budget, vix, fg, rm):
 # ───────────────────────────────────────────────────────────────────
 
 def render_deepdive(budget):
+    # Don't re-run if rerun was triggered by Compare or Scanner
+    if st.session_state.get("_signals_updated_by") in ("compare", "scanner"):
+        st.session_state.pop("_signals_updated_by", None)
+        return
+
     st.subheader("🔬 Deep Dive")
 
     c1, c2, c3, c4 = st.columns([4, 1, 1, 1])
@@ -2093,7 +2098,7 @@ def render_deepdive(budget):
                 bdown_str = " · ".join(f"{k}: {v}/100" for k,v in value_bdown.items())
                 st.caption(bdown_str)
 
-    # Write back to session signals_df (tagged so value screen doesn't re-trigger)
+    # Write back to session signals_df (tagged so Compare tab doesn't re-trigger)
     update_signals_df({
         "ticker": ticker, "data_source": "live_deepdive",
         "price": cur_p, "ma200": raw["ma200"],
@@ -2103,7 +2108,7 @@ def render_deepdive(budget):
         "conf": raw["confidence"], "action": action, "score": score,
         "is_knife": int(is_knife), "reversal": int(reversal),
         "computed_at": date.today().isoformat(),
-    })
+    }, source_tab="deepdive")
 
 
 # ───────────────────────────────────────────────────────────────────
@@ -2119,6 +2124,11 @@ SP500_TOP50 = [
 ]
 
 def render_compare():
+    # Don't re-run if rerun was triggered by Deep Dive or Scanner
+    if st.session_state.get("_signals_updated_by") in ("deepdive", "scanner"):
+        st.session_state.pop("_signals_updated_by", None)
+        return
+
     st.subheader("⚖️ Compare")
     st.caption("Side-by-side fundamental comparison of multiple stocks. "
                "Use this to validate candidates from the scanner before committing capital.")
