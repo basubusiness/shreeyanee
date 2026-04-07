@@ -762,7 +762,7 @@ def _safe_float(val):
     except Exception:
         return None
 
-def fetch_yf_fundamentals(ticker, timeout=8):
+def fetch_yf_fundamentals(ticker, timeout=15):
     cache_key = f"yfund_{ticker}"
     cached = cache_get(cache_key)
     if cached is not None:
@@ -772,16 +772,15 @@ def fetch_yf_fundamentals(ticker, timeout=8):
         def _fetch():
             t = yf.Ticker(ticker)
             info = {}
-            # yfinance 1.2.0: get_info() is more reliable than .info
+            # Try get_info() first (yfinance 1.2.0), fall back to .info
             for method in ["get_info", "info"]:
                 try:
-                    result = getattr(t, method)
-                    info = result() if callable(result) else result
+                    raw = getattr(t, method)
+                    info = raw() if callable(raw) else raw
                     if info and len(info) > 5:
                         break
                 except Exception:
                     continue
-
             if not info:
                 return {}
 
@@ -791,25 +790,25 @@ def fetch_yf_fundamentals(ticker, timeout=8):
                     if v is not None and v > 0: return v
                 return None
 
-            pe       = _get("trailingPE","forwardPE")
-            fwd_pe   = _get("forwardPE")
-            div      = _get("dividendYield","trailingAnnualDividendYield")
-            mcap     = _get("marketCap")
-            beta     = _get("beta")
-            pb       = _get("priceToBook")
-            roe      = _safe_float(info.get("returnOnEquity"))
-            de_raw   = _safe_float(info.get("debtToEquity"))
-            rev_gr   = _safe_float(info.get("revenueGrowth"))
-            eps_gr   = _safe_float(info.get("earningsGrowth"))
-            fcf_raw  = _safe_float(info.get("freeCashflow"))
+            pe        = _get("trailingPE","forwardPE")
+            fwd_pe    = _get("forwardPE")
+            div       = _get("dividendYield","trailingAnnualDividendYield")
+            mcap      = _get("marketCap")
+            beta      = _get("beta")
+            pb        = _get("priceToBook")
+            roe       = _safe_float(info.get("returnOnEquity"))
+            de_raw    = _safe_float(info.get("debtToEquity"))
+            rev_gr    = _safe_float(info.get("revenueGrowth"))
+            eps_gr    = _safe_float(info.get("earningsGrowth"))
+            fcf_raw   = _safe_float(info.get("freeCashflow"))
             fcf_yield = (fcf_raw / mcap) if fcf_raw and mcap and mcap > 0 else None
-            peg      = _safe_float(info.get("trailingPegRatio"))
+            peg       = _safe_float(info.get("trailingPegRatio"))
             if peg is None and pe and eps_gr and 0.001 < eps_gr < 5:
                 try: peg = round(pe / (eps_gr * 100), 2)
                 except: pass
             de_ratio = (de_raw / 100) if de_raw and de_raw > 10 else de_raw
 
-            result = {
+            return {
                 "fmp_pe_ttm":     pe or fwd_pe,
                 "fmp_peg":        peg,
                 "fmp_pb":         pb,
@@ -821,21 +820,18 @@ def fetch_yf_fundamentals(ticker, timeout=8):
                 "fmp_div_yield":  div,
                 "fmp_mcap":       mcap,
                 "fmp_beta":       beta,
-                "_source": "yfinance",
+                "_source":        "yfinance",
             }
-            # Return empty dict if we got no useful data at all
-            useful = [v for k, v in result.items() if k != "_source" and v is not None]
-            return result if useful else {}
 
         with _cf.ThreadPoolExecutor(max_workers=1) as ex:
             result = ex.submit(_fetch).result(timeout=timeout)
         if result:
             cache_set(cache_key, result, ttl=3600)
-        return result
+        return result or {}
     except Exception:
         return {}
 
-def fetch_yf_fundamentals_batch(tickers, max_workers=8, timeout=6):
+def fetch_yf_fundamentals_batch(tickers, max_workers=8, timeout=20):
     results, timed_out = {}, []
     to_fetch = []
     for t in tickers:
@@ -1812,7 +1808,7 @@ def render_deepdive(budget):
     fund_data = {}
     if not is_etf:
         with st.spinner("Fetching fundamentals…"):
-            fund_data = fetch_yf_fundamentals(ticker, timeout=8)
+            fund_data = fetch_yf_fundamentals(ticker, timeout=20)
             if _get_fmp_key():
                 fmp_data = fetch_fmp_fundamentals(ticker)
                 fund_data = {**fund_data, **fmp_data}
