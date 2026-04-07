@@ -1141,23 +1141,24 @@ def render_sidebar():
     sdf = get_signals_df()
     if not sdf.empty and "ticker" in sdf.columns:
         _tickers  = sdf["ticker"].dropna().str.upper()
-        _names    = sdf.get("name", pd.Series([""] * len(sdf))).fillna("").str[:30]
+        _names    = sdf.get("name", pd.Series([""] * len(sdf))).fillna("").str[:28]
         _actions  = sdf.get("action", pd.Series([""] * len(sdf))).fillna("")
-        _options  = [""] + [
-            f"{t}  —  {n}  ({a})" if n else f"{t}  ({a})"
+        _options  = ["🔍 Search ticker or name…"] + [
+            f"{t}  —  {n}  [{a}]" if n else f"{t}  [{a}]"
             for t, n, a in zip(_tickers, _names, _actions)
         ]
+        _search_key = f"ticker_search_{st.session_state.get('_search_reset', 0)}"
         _selected = st.sidebar.selectbox(
-            "🔍 Search ticker",
+            "search",
             _options,
             index=0,
-            placeholder="Type ticker or name…",
             label_visibility="collapsed",
+            key=_search_key,
         )
-        if _selected:
-            _pick = _selected.split("  —  ")[0].strip().split("  (")[0].strip()
-            if _pick and _pick != st.session_state.get("_search_last", ""):
-                st.session_state["_search_last"]    = _pick
+        if _selected and _selected != _options[0]:
+            _pick = _selected.split("  —  ")[0].strip().split("  [")[0].strip()
+            if _pick:
+                st.session_state["_search_reset"]   = st.session_state.get("_search_reset", 0) + 1
                 st.session_state["dd_ticker"]       = _pick
                 st.session_state["dd_auto"]         = True
                 st.session_state["_dd_last_ticker"] = ""
