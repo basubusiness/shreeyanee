@@ -2176,10 +2176,33 @@ def render_compare():
     refresh_vs  = c4.button("🔄 Refresh", help="Re-fetch live data for all tickers")
 
     if not run_vs and not refresh_vs:
-        st.info(
-            "Enter tickers above and click **⚖️ Compare** to fetch live fundamentals.\n\n"
-            "💡 **Tip:** You can also paste tickers directly from the scanner — just copy the ticker column values."
-        )
+        cached = st.session_state.get("_compare_results")
+        if cached is not None:
+            df_out, summary = cached
+            st.success(summary)
+            st.caption("Sorted by quality score. Click 🔬 Deep Dive on any row for detailed analysis.")
+            def _style_vs(val):
+                if val == "A":     return "color: #0d9488; font-weight: 700;"
+                if val == "B":     return "color: #0284c7; font-weight: 600;"
+                if val == "C":     return "color: #d97706;"
+                if val == "D":     return "color: #dc2626;"
+                if val == "BUY":   return "color: #0d9488; font-weight: 700;"
+                if val == "WATCH": return "color: #0284c7; font-weight: 600;"
+                if val == "SELL":  return "color: #dc2626; font-weight: 700;"
+                return ""
+            st.dataframe(
+                df_out.style.map(_style_vs, subset=["Grade","Tech"]),
+                use_container_width=True,
+                height=min(600, 40 + len(df_out)*35),
+                hide_index=True,
+            )
+            csv = df_out.to_csv(index=False).encode("utf-8")
+            st.download_button("⬇️ Download CSV", csv, "value_screen.csv", "text/csv")
+        else:
+            st.info(
+                "Enter tickers above and click **⚖️ Compare** to fetch live fundamentals.\n\n"
+                "💡 **Tip:** You can also paste tickers directly from the scanner — just copy the ticker column values."
+            )
         return
 
     tickers = [t.strip().upper() for t in tickers_raw.replace("\n"," ").split(",") if t.strip()]
@@ -2278,7 +2301,10 @@ def render_compare():
     n_a  = sum(1 for r in rows if r["Grade"]=="A")
     n_b  = sum(1 for r in rows if r["Grade"]=="B")
     n_hi = sum(1 for r in rows if "HIGH" in str(r.get("Conviction","")))
-    st.success(f"⚖️ {len(rows)} stocks compared · Grade A: {n_a} · Grade B: {n_b} · High conviction: {n_hi}")
+    summary = f"⚖️ {len(rows)} stocks compared · Grade A: {n_a} · Grade B: {n_b} · High conviction: {n_hi}"
+    st.session_state["_compare_results"] = (df_out, summary)
+
+    st.success(summary)
     st.caption("Sorted by quality score. Click 🔬 Deep Dive on any row for detailed analysis and buy/sell decision.")
 
     def _style_vs(val):
@@ -2309,14 +2335,25 @@ def render_compare():
 def main():
     preset, filters, budget, tickers, vix, fg, rm = render_sidebar()
 
-    # Auto-switch to Deep Dive tab when triggered from scanner
-    default_tab = st.session_state.pop("_active_tab", 0)
+    tab_param = st.query_params.get("tab", "scanner")
+    if st.session_state.get("_active_tab") == 1:
+        st.session_state.pop("_active_tab", None)
+        st.query_params["tab"] = "deepdive"
+        tab_param = "deepdive"
 
     tab_scanner, tab_deepdive, tab_value = st.tabs([
         "🔭 Market Scanner",
         "🔬 Deep Dive",
         "⚖️ Compare",
     ])
+
+    if tab_param == "deepdive":
+        st.markdown("""<script>
+        window.addEventListener('load', function() {
+            var tabs = window.parent.document.querySelectorAll('[data-baseweb="tab"]');
+            if (tabs.length >= 2) { tabs[1].click(); }
+        });
+        </script>""", unsafe_allow_html=True)
 
     with tab_scanner:
         render_scanner(tickers, budget, vix, fg, rm)
