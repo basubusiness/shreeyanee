@@ -30,7 +30,7 @@ FD_AVAILABLE = True
 except ImportError:
 FD_AVAILABLE = False
 
-APP_VERSION = “v11.0-local”
+APP_VERSION = “v11.0”
 BUILD_TIME = datetime.now(timezone.utc).strftime(”%d %b %H:%M UTC”)
 
 # ───────────────────────────────────────────────────────────────────
