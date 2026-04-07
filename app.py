@@ -116,7 +116,7 @@ def _get_cache_store():
 def _get_cache_lock():
     return threading.Lock()
 
-_DISK_CACHE_FILE = "/tmp/mde_fmp_cache.json"
+_DISK_CACHE_FILE = "/tmp/mde_fmp_cache.json"  # kept for compatibility but not used
 
 def cache_get(key):
     store = _get_cache_store()
@@ -137,34 +137,12 @@ def cache_set(key, val, ttl=None):
     expires = (time.time() + ttl) if ttl else None
     with lock:
         store[key] = (val, expires)
-    if str(key).startswith("fmp_"):
-        threading.Thread(target=_save_disk_cache, daemon=True).start()
 
 def _save_disk_cache():
-    store = _get_cache_store()
-    lock  = _get_cache_lock()
-    try:
-        with lock:
-            fmp = {k: v for k, v in store.items() if str(k).startswith("fmp_")}
-        with open(_DISK_CACHE_FILE, "w") as f:
-            json.dump(fmp, f)
-    except Exception:
-        pass
+    pass  # no-op — Supabase write-back handles persistence
 
 def _load_disk_cache():
-    store = _get_cache_store()
-    lock  = _get_cache_lock()
-    try:
-        if os.path.exists(_DISK_CACHE_FILE):
-            with open(_DISK_CACHE_FILE) as f:
-                data = json.load(f)
-            now = time.time()
-            with lock:
-                for k, (v, exp) in data.items():
-                    if exp is None or exp > now:
-                        store[k] = (v, exp)
-    except Exception:
-        pass
+    pass  # no-op
 
 
 # ───────────────────────────────────────────────────────────────────
@@ -293,10 +271,57 @@ def get_signals_df():
         st.session_state["signals_df"] = load_signals()
     return st.session_state["signals_df"]
 
-def update_signals_df(new_row_dict, source_tab=None):
-    """Write a fresh signal row into session-level signals_df.
-    source_tab: tag the update so other tabs can ignore mid-render reruns.
+def _push_signal_to_supabase(row_dict):
     """
+    Persist an enriched signal row back to Supabase in a background thread.
+    Called after Deep Dive fetches live fundamentals — so subsequent app loads
+    show updated score/grade/fundamentals without re-fetching from yfinance.
+    Fire-and-forget: never blocks the UI.
+    """
+    import math, threading
+
+    def _do_push():
+        try:
+            sb = _get_supabase()
+            if sb is None:
+                return
+            INT_COLS = {"rsi_rising","macd_bull","macd_accel","is_knife","reversal","momentum_up"}
+            SIGNAL_COLS = {
+                "ticker","action","score","price","ma50","ma200","dist_ma200","dist_52w",
+                "rsi","rsi_rising","macd","macd_signal","macd_hist","macd_bull","macd_accel",
+                "vol_pct","conf","is_knife","reversal","ret_1w","ret_1m","ret_3m","ret_6m","ret_1y",
+                "momentum_up","pe_ratio","div_yield","market_cap","beta","pb_ratio","roe",
+                "debt_equity","fcf_yield","rev_growth","peg","value_score","value_grade","fund_delta",
+                "name","isin","type","country","sector","currency","domicile","dist_policy",
+                "ter","fund_size_eur","replication","strategy","data_source","last_source",
+                "computed_at","time_updated",
+            }
+            clean = {}
+            for k, v in row_dict.items():
+                if k not in SIGNAL_COLS:
+                    continue
+                if v is None:
+                    clean[k] = None
+                elif isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+                    clean[k] = None
+                elif isinstance(v, str) and v in ("nan","None","NaN",""):
+                    clean[k] = None
+                elif k in INT_COLS:
+                    try:    clean[k] = int(v)
+                    except: clean[k] = None
+                else:
+                    clean[k] = v
+            if "ticker" not in clean:
+                return
+            sb.table("signals").upsert(clean, on_conflict="ticker").execute()
+        except Exception:
+            pass  # never crash the UI for a background sync
+
+    threading.Thread(target=_do_push, daemon=True).start()
+
+
+def update_signals_df(new_row_dict, source_tab=None):
+    """Write a fresh signal row into session-level signals_df and persist to Supabase."""
     sdf = get_signals_df().copy()
     if not sdf.empty and "ticker" in sdf.columns:
         sdf = sdf[sdf["ticker"] != new_row_dict["ticker"]]
@@ -304,6 +329,9 @@ def update_signals_df(new_row_dict, source_tab=None):
     st.session_state["signals_df"] = sdf
     if source_tab:
         st.session_state["_signals_updated_by"] = source_tab
+    # Persist enriched signal back to Supabase in background (fire-and-forget)
+    _push_signal_to_supabase(new_row_dict)
+
 
 def _build_name_lookup():
     lookup = {}
@@ -817,7 +845,10 @@ def fetch_yf_fundamentals_batch(tickers, max_workers=8, timeout=6):
     return results, timed_out
 
 def _get_fmp_key():
-    return os.environ.get("FMP_API_KEY","").strip() or ""
+    try:
+        return st.secrets.get("FMP_API_KEY", "").strip()
+    except Exception:
+        return os.environ.get("FMP_API_KEY", "").strip()
 
 def fetch_fmp_fundamentals(ticker):
     key = _get_fmp_key()
