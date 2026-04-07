@@ -2285,7 +2285,7 @@ def render_compare():
         return ""
 
     st.dataframe(
-        df_out.style.applymap(_style_vs, subset=["Grade","Tech"]),
+        df_out.style.map(_style_vs, subset=["Grade","Tech"]),
         use_container_width=True,
         height=min(600, 40 + len(df_out)*35),
         hide_index=True,
