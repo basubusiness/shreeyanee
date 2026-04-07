@@ -762,72 +762,66 @@ def _safe_float(val):
     except Exception:
         return None
 
-def fetch_yf_fundamentals(ticker, timeout=15):
+def fetch_yf_fundamentals(ticker, timeout=20):
     cache_key = f"yfund_{ticker}"
     cached = cache_get(cache_key)
     if cached is not None:
         return cached
     try:
-        import concurrent.futures as _cf
-        def _fetch():
-            t = yf.Ticker(ticker)
-            info = {}
-            # Try get_info() first (yfinance 1.2.0), fall back to .info
-            for method in ["get_info", "info"]:
-                try:
-                    raw = getattr(t, method)
-                    info = raw() if callable(raw) else raw
-                    if info and len(info) > 5:
-                        break
-                except Exception:
-                    continue
-            if not info:
-                return {}
+        t = yf.Ticker(ticker)
+        info = {}
+        for method in ["get_info", "info"]:
+            try:
+                raw = getattr(t, method)
+                info = raw() if callable(raw) else raw
+                if info and len(info) > 5:
+                    break
+            except Exception:
+                continue
+        if not info:
+            return {}
 
-            def _get(*keys):
-                for k in keys:
-                    v = _safe_float(info.get(k))
-                    if v is not None and v > 0: return v
-                return None
+        def _get(*keys):
+            for k in keys:
+                v = _safe_float(info.get(k))
+                if v is not None and v > 0: return v
+            return None
 
-            pe        = _get("trailingPE","forwardPE")
-            fwd_pe    = _get("forwardPE")
-            div       = _get("dividendYield","trailingAnnualDividendYield")
-            mcap      = _get("marketCap")
-            beta      = _get("beta")
-            pb        = _get("priceToBook")
-            roe       = _safe_float(info.get("returnOnEquity"))
-            de_raw    = _safe_float(info.get("debtToEquity"))
-            rev_gr    = _safe_float(info.get("revenueGrowth"))
-            eps_gr    = _safe_float(info.get("earningsGrowth"))
-            fcf_raw   = _safe_float(info.get("freeCashflow"))
-            fcf_yield = (fcf_raw / mcap) if fcf_raw and mcap and mcap > 0 else None
-            peg       = _safe_float(info.get("trailingPegRatio"))
-            if peg is None and pe and eps_gr and 0.001 < eps_gr < 5:
-                try: peg = round(pe / (eps_gr * 100), 2)
-                except: pass
-            de_ratio = (de_raw / 100) if de_raw and de_raw > 10 else de_raw
+        pe        = _get("trailingPE","forwardPE")
+        fwd_pe    = _get("forwardPE")
+        div       = _get("dividendYield","trailingAnnualDividendYield")
+        mcap      = _get("marketCap")
+        beta      = _get("beta")
+        pb        = _get("priceToBook")
+        roe       = _safe_float(info.get("returnOnEquity"))
+        de_raw    = _safe_float(info.get("debtToEquity"))
+        rev_gr    = _safe_float(info.get("revenueGrowth"))
+        eps_gr    = _safe_float(info.get("earningsGrowth"))
+        fcf_raw   = _safe_float(info.get("freeCashflow"))
+        fcf_yield = (fcf_raw / mcap) if fcf_raw and mcap and mcap > 0 else None
+        peg       = _safe_float(info.get("trailingPegRatio"))
+        if peg is None and pe and eps_gr and 0.001 < eps_gr < 5:
+            try: peg = round(pe / (eps_gr * 100), 2)
+            except: pass
+        de_ratio = (de_raw / 100) if de_raw and de_raw > 10 else de_raw
 
-            return {
-                "fmp_pe_ttm":     pe or fwd_pe,
-                "fmp_peg":        peg,
-                "fmp_pb":         pb,
-                "fmp_fcf_yield":  fcf_yield,
-                "fmp_roe":        roe,
-                "fmp_debt_eq":    de_ratio,
-                "fmp_rev_growth": rev_gr,
-                "fmp_eps_growth": eps_gr,
-                "fmp_div_yield":  div,
-                "fmp_mcap":       mcap,
-                "fmp_beta":       beta,
-                "_source":        "yfinance",
-            }
-
-        with _cf.ThreadPoolExecutor(max_workers=1) as ex:
-            result = ex.submit(_fetch).result(timeout=timeout)
+        result = {
+            "fmp_pe_ttm":     pe or fwd_pe,
+            "fmp_peg":        peg,
+            "fmp_pb":         pb,
+            "fmp_fcf_yield":  fcf_yield,
+            "fmp_roe":        roe,
+            "fmp_debt_eq":    de_ratio,
+            "fmp_rev_growth": rev_gr,
+            "fmp_eps_growth": eps_gr,
+            "fmp_div_yield":  div,
+            "fmp_mcap":       mcap,
+            "fmp_beta":       beta,
+            "_source":        "yfinance",
+        }
         if result:
             cache_set(cache_key, result, ttl=3600)
-        return result or {}
+        return result
     except Exception:
         return {}
 
