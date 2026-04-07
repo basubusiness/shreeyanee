@@ -1137,6 +1137,34 @@ def render_sidebar():
     st.sidebar.markdown(f"**📡 Market Decision Engine** `{APP_VERSION}`")
     st.sidebar.caption(f"deployed {BUILD_TIME}")
 
+    # ── Ticker search ─────────────────────────────────────────────────
+    sdf = get_signals_df()
+    if not sdf.empty and "ticker" in sdf.columns:
+        _tickers  = sdf["ticker"].dropna().str.upper()
+        _names    = sdf.get("name", pd.Series([""] * len(sdf))).fillna("").str[:30]
+        _actions  = sdf.get("action", pd.Series([""] * len(sdf))).fillna("")
+        _options  = [""] + [
+            f"{t}  —  {n}  ({a})" if n else f"{t}  ({a})"
+            for t, n, a in zip(_tickers, _names, _actions)
+        ]
+        _selected = st.sidebar.selectbox(
+            "🔍 Search ticker",
+            _options,
+            index=0,
+            placeholder="Type ticker or name…",
+            label_visibility="collapsed",
+        )
+        if _selected:
+            _pick = _selected.split("  —  ")[0].strip().split("  (")[0].strip()
+            if _pick and _pick != st.session_state.get("_search_last", ""):
+                st.session_state["_search_last"]    = _pick
+                st.session_state["dd_ticker"]       = _pick
+                st.session_state["dd_auto"]         = True
+                st.session_state["_dd_last_ticker"] = ""
+                st.session_state["_active_tab"]     = 1
+                st.rerun()
+    st.sidebar.divider()
+
     # Recently viewed tickers
     viewed = st.session_state.get("_viewed_tickers", [])
     if viewed:
