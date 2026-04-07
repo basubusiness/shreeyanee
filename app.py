@@ -1743,15 +1743,11 @@ def render_scanner(tickers, budget, vix, fg, rm):
 # ───────────────────────────────────────────────────────────────────
 
 def render_deepdive(budget):
-    # Don't re-run if rerun was triggered by Compare or Scanner
-    if st.session_state.get("_signals_updated_by") in ("compare", "scanner"):
-        st.session_state.pop("_signals_updated_by", None)
-        return
-
     st.subheader("🔬 Deep Dive")
 
     c1, c2, c3, c4 = st.columns([4, 1, 1, 1])
-    ticker_input = c1.text_input("Ticker or ISIN", placeholder="e.g. VWRA or IE00B3RBWM25")
+    ticker_input = c1.text_input("Ticker or ISIN", placeholder="e.g. VWRA or IE00B3RBWM25",
+                                  value=st.session_state.get("_dd_last_ticker", ""))
     budget_dd    = c2.number_input("Budget (EUR)", min_value=100, value=budget, step=100)
     analyse_btn  = c3.button("🔍 Analyse", type="primary")
     refresh_btn  = c4.button("🔄 Refresh", help="Force live re-fetch, busting all caches for this ticker")
@@ -1765,12 +1761,17 @@ def render_deepdive(budget):
     if not ticker_input and "dd_ticker" in st.session_state:
         ticker_input = st.session_state["dd_ticker"]
 
-    if not (analyse_btn or refresh_btn or auto_dive) or not ticker_input:
-        st.info("Enter a ticker or ISIN and click **Analyse**.")
-        return
+    # Re-render last analysis on rerun (e.g. triggered by Compare tab update)
+    if not analyse_btn and not refresh_btn and not auto_dive:
+        if ticker_input and ticker_input == st.session_state.get("_dd_last_ticker"):
+            analyse_btn = True  # silently re-trigger with cached data
+        else:
+            st.info("Enter a ticker or ISIN and click **Analyse**.")
+            return
 
     ticker       = ticker_input.strip().upper()
-    force_refr   = refresh_btn  # always force-refresh on Refresh button
+    force_refr   = refresh_btn
+    st.session_state["_dd_last_ticker"] = ticker  # persist so reruns re-render
 
     # Track viewed tickers
     viewed = st.session_state.get("_viewed_tickers", [])
@@ -2124,11 +2125,7 @@ SP500_TOP50 = [
 ]
 
 def render_compare():
-    # Don't re-run if rerun was triggered by Deep Dive or Scanner
-    if st.session_state.get("_signals_updated_by") in ("deepdive", "scanner"):
-        st.session_state.pop("_signals_updated_by", None)
-        return
-
+    st.session_state.pop("_signals_updated_by", None)
     st.subheader("⚖️ Compare")
     st.caption("Side-by-side fundamental comparison of multiple stocks. "
                "Use this to validate candidates from the scanner before committing capital.")
