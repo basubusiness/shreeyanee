@@ -770,15 +770,27 @@ def fetch_yf_fundamentals(ticker, timeout=8):
     try:
         import concurrent.futures as _cf
         def _fetch():
-            t    = yf.Ticker(ticker)
+            t = yf.Ticker(ticker)
             info = {}
-            try:    info = t.info or {}
-            except: pass
+            # yfinance 1.2.0: get_info() is more reliable than .info
+            for method in ["get_info", "info"]:
+                try:
+                    result = getattr(t, method)
+                    info = result() if callable(result) else result
+                    if info and len(info) > 5:
+                        break
+                except Exception:
+                    continue
+
+            if not info:
+                return {}
+
             def _get(*keys):
                 for k in keys:
                     v = _safe_float(info.get(k))
                     if v is not None and v > 0: return v
                 return None
+
             pe       = _get("trailingPE","forwardPE")
             fwd_pe   = _get("forwardPE")
             div      = _get("dividendYield","trailingAnnualDividendYield")
@@ -795,9 +807,9 @@ def fetch_yf_fundamentals(ticker, timeout=8):
             if peg is None and pe and eps_gr and 0.001 < eps_gr < 5:
                 try: peg = round(pe / (eps_gr * 100), 2)
                 except: pass
-            # Normalise D/E: yfinance returns as % (150 = 1.5x)
             de_ratio = (de_raw / 100) if de_raw and de_raw > 10 else de_raw
-            return {
+
+            result = {
                 "fmp_pe_ttm":     pe or fwd_pe,
                 "fmp_peg":        peg,
                 "fmp_pb":         pb,
@@ -811,9 +823,14 @@ def fetch_yf_fundamentals(ticker, timeout=8):
                 "fmp_beta":       beta,
                 "_source": "yfinance",
             }
+            # Return empty dict if we got no useful data at all
+            useful = [v for k, v in result.items() if k != "_source" and v is not None]
+            return result if useful else {}
+
         with _cf.ThreadPoolExecutor(max_workers=1) as ex:
             result = ex.submit(_fetch).result(timeout=timeout)
-        cache_set(cache_key, result, ttl=3600)
+        if result:
+            cache_set(cache_key, result, ttl=3600)
         return result
     except Exception:
         return {}
