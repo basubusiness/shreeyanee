@@ -28,11 +28,6 @@ try:
 except ImportError:
     FD_AVAILABLE = False
 
-try:
-    import pandas_datareader as pdr
-    PDR_AVAILABLE = True
-except ImportError:
-    PDR_AVAILABLE = False
 
 APP_VERSION = "v11.0"
 BUILD_TIME = datetime.now(timezone.utc).strftime("%d %b %H:%M UTC")
@@ -427,25 +422,9 @@ def get_fg_index():
 # ───────────────────────────────────────────────────────────────────
 
 def _fetch_stooq(symbol):
-    if not PDR_AVAILABLE:
-        return pd.DataFrame()
-    try:
-        stooq_sym = symbol
-        if symbol.endswith(".L"):    stooq_sym = symbol.replace(".L", ".UK")
-        elif symbol.endswith(".AS"): stooq_sym = symbol.replace(".AS", ".NL")
-        elif symbol.endswith(".PA"): stooq_sym = symbol.replace(".PA", ".FR")
-        elif symbol.endswith(".MI"): stooq_sym = symbol.replace(".MI", ".IT")
-        elif symbol.endswith(".SW"): stooq_sym = symbol.replace(".SW", ".CH")
-        elif "." not in symbol:      stooq_sym = symbol + ".US"
-        end   = pd.Timestamp.today()
-        start = end - pd.Timedelta(days=800)
-        df = pdr.get_data_stooq(stooq_sym, start=start, end=end)
-        if df.empty or "Close" not in df.columns:
-            return pd.DataFrame()
-        df = df.sort_index()
-        return flatten_df(df) if len(df["Close"].dropna()) >= 30 else pd.DataFrame()
-    except Exception:
-        return pd.DataFrame()
+    # Stooq blocks all automated requests — removed 2026-04
+    return pd.DataFrame()
+
 
 def fetch_justetf_chart(isin):
     if not isin or len(str(isin)) != 12 or not JUSTETF_AVAILABLE:
@@ -543,10 +522,6 @@ def fetch_ticker_data(ticker, isin=None, force_refresh=False):
         df = pd.DataFrame()
         used_sym = ticker
         for _src, _sym in _attempts:
-            df = _fetch_stooq(_sym)
-            if _valid(df):
-                used_sym = _sym
-                break
             df = _fetch_history(_sym)
             if _valid(df):
                 used_sym = _sym
@@ -1139,6 +1114,19 @@ def render_sidebar():
     st.sidebar.markdown(f"**📡 Market Decision Engine** `{APP_VERSION}`")
     st.sidebar.caption(f"deployed {BUILD_TIME}")
 
+    # Recently viewed tickers
+    viewed = st.session_state.get("_viewed_tickers", [])
+    if viewed:
+        st.sidebar.markdown("**🕐 Recently viewed**")
+        cols = st.sidebar.columns(min(len(viewed), 3))
+        for i, t in enumerate(viewed[-3:]):
+            if cols[i].button(t, key=f"rv_{t}", use_container_width=True):
+                st.session_state["dd_ticker"]   = t
+                st.session_state["dd_auto"]     = True
+                st.session_state["_active_tab"] = 1
+                st.rerun()
+        st.sidebar.divider()
+
     # (2) Refresh button — busts VIX + F&G cache so re-fetch is live
     if st.sidebar.button("🔄 Refresh indicators", use_container_width=True):
         store = _get_cache_store()
@@ -1383,17 +1371,17 @@ def build_result_df(sig, budget, fg, rm):
     rg  = pd.to_numeric(s.get("rev_growth", pd.Series([np.nan]*len(s))), errors="coerce")
     rg_str = (rg*100).round(0).astype("Int64").astype(str).replace("<NA>","—") + "% rev"
     core_risk_col = s.get("core_risk", pd.Series([""]*len(s))).fillna("").astype(str)
-    driver = np.where(s.get("is_core",  False), "ETF dip · " + core_risk_col,
-             np.where(s.get("is_value", False), "Oversold + Grade " + vg.values,
-             np.where(s.get("is_momentum",False), "Momentum + " + rg_str.values,
-             np.where(s.get("is_darkhorse",False), "Dark horse + " + rg_str.values,
+    driver = np.where(s.get("is_core",  False), "Dip · " + core_risk_col,
+             np.where(s.get("is_value", False), "Value · Gr." + vg.values,
+             np.where(s.get("is_momentum",False), "Momentum · " + rg_str.values,
+             np.where(s.get("is_darkhorse",False), "Dark horse · " + rg_str.values,
              "—"))))
 
     result_df = pd.DataFrame({
         "Ticker":   s["ticker"],
         "Name":     s["name"].fillna("") if "name" in s.columns else "",
         "Signal":   s["action"],
-        "Score":    s["score"].round(3),
+        "Score":    s["score"].round(2),
         "Price":    pd.to_numeric(s.get("price"),    errors="coerce").round(2),
         "Dist%":    dm.round(2).fillna(0),
         "RSI":      s["rsi"].round(1),
@@ -1532,18 +1520,28 @@ def render_scanner(tickers, budget, vix, fg, rm):
     computed   = st.session_state.get("scan_status","").split("updated:")[-1].strip() if "updated:" in st.session_state.get("scan_status","") else ""
 
     # ── Summary bar — one source of truth ────────────────────────────
-    st.caption(f"{n_total:,} signals in scope · updated: {computed}" if computed else f"{n_total:,} signals in scope")
+    today = datetime.now().strftime("%d %b %Y")
+    age_note = f" · built: {computed.strip()}" if computed else ""
+    st.caption(f"{n_total:,} signals · as of {today}{age_note}")
 
     n_core = int(result_df["_core"].sum())
     n_val  = int(result_df["_value"].sum())
     n_mom  = int(result_df["_momentum"].sum())
     n_dh   = int(result_df["_darkhorse"].sum())
 
+    # Delta vs previous scan
+    prev = st.session_state.get("_prev_scan_counts", {})
+    d_core = n_core - prev.get("core", n_core)
+    d_val  = n_val  - prev.get("val",  n_val)
+    d_mom  = n_mom  - prev.get("mom",  n_mom)
+    d_dh   = n_dh   - prev.get("dh",   n_dh)
+    st.session_state["_prev_scan_counts"] = {"core":n_core,"val":n_val,"mom":n_mom,"dh":n_dh}
+
     k1,k2,k3,k4 = st.columns(4)
-    k1.metric("🟡 Timing",      n_core, help="Dip signals — ETFs sorted by risk, stocks flagged as speculative")
-    k2.metric("🔵 Value",       n_val,  help="Oversold quality stocks with solid fundamentals")
-    k3.metric("🔴 Momentum",    n_mom,  help="Stocks running with strong revenue growth")
-    k4.metric("⚡ Dark Horse",  n_dh,   help="Beaten-down stocks with high growth potential")
+    k1.metric("🟡 Timing",     n_core, delta=d_core if d_core else None, help="Dip signals — ETFs sorted by risk, stocks flagged as speculative")
+    k2.metric("🔵 Value",      n_val,  delta=d_val  if d_val  else None, help="Oversold quality stocks with solid fundamentals")
+    k3.metric("🔴 Momentum",   n_mom,  delta=d_mom  if d_mom  else None, help="Stocks running with strong revenue growth")
+    k4.metric("⚡ Dark Horse", n_dh,   delta=d_dh   if d_dh   else None, help="Beaten-down stocks with high growth potential")
 
     # ── Dynamic tab labels — no hardcoded asset class ────────────────
     tab_core, tab_value, tab_mom, tab_dh, tab_live = st.tabs([
@@ -1649,7 +1647,8 @@ def render_scanner(tickers, budget, vix, fg, rm):
         df_mom = result_df[result_df["_momentum"]].sort_values("Score", ascending=False).reset_index(drop=True)
         df_mom.insert(0,"#",range(1,len(df_mom)+1))
         _show_strategy_table(df_mom, "Momentum", "#dc2626",
-            "No momentum signals in this filter set. Needs price near/above MA200 + RSI 50–72 + revenue growth data. Try US Stocks preset after rebuilding signals.")
+            "No momentum signals yet. This strategy requires revenue growth data (>20%) which needs the fundamentals rebuild. "
+            "Once fundamentals are loaded, try the US Stocks or Global Stocks preset.")
 
     with tab_dh:
         st.caption("Beaten-down stocks with high revenue growth — the market is wrong, or early.")
@@ -1663,7 +1662,8 @@ def render_scanner(tickers, budget, vix, fg, rm):
         df_dh = result_df[result_df["_darkhorse"]].sort_values("Score", ascending=False).reset_index(drop=True)
         df_dh.insert(0,"#",range(1,len(df_dh)+1))
         _show_strategy_table(df_dh, "Dark Horse", "#7c3aed",
-            "No dark horse signals in this filter set. Needs oversold technicals + revenue growth data (15%+). Try US Stocks or Global Stocks after rebuilding signals.")
+            "No dark horse signals yet. This strategy requires revenue growth data (>15%) from the fundamentals rebuild. "
+            "Once fundamentals are loaded, beaten-down high-growth companies will appear here.")
 
     with tab_live:
         st.caption("Best picks across all strategies — one view, ranked and interleaved.")
@@ -1724,6 +1724,12 @@ def render_deepdive(budget):
 
     ticker       = ticker_input.strip().upper()
     force_refr   = refresh_btn  # always force-refresh on Refresh button
+
+    # Track viewed tickers
+    viewed = st.session_state.get("_viewed_tickers", [])
+    if ticker not in viewed:
+        viewed.append(ticker)
+    st.session_state["_viewed_tickers"] = viewed[-10:]  # keep last 10
 
     # ISIN → ticker lookup
     isin = None
@@ -1816,19 +1822,31 @@ def render_deepdive(budget):
 
     # ── KPI row ───────────────────────────────────────────────────────
     st.markdown(f"### {ticker} — {name}")
-    if isin:
-        st.caption(f"ISIN: {isin}")
+    caption_parts = []
+    if isin: caption_parts.append(f"ISIN: {isin}")
+    if is_etf: caption_parts.append("ETF")
+    else: caption_parts.append("Stock")
+    caption_parts.append(f"Updated: {date.today().strftime('%d %b %Y')}")
+    st.caption("  ·  ".join(caption_parts))
 
     ma200_label = {"rising":"↗ Rising","falling":"↘ Falling","flat":"→ Flat"}.get(ma200_trend,"→ Flat")
-    value_label = f"{value_score}/100 ({value_grade})" if value_available else "N/A"
+    value_label = f"{value_score}/100 (Grade {value_grade})" if value_available else "—"
+
+    # 52w high/low
+    hi52 = float(close.tail(252).max()) if len(close) >= 50 else cur_p
+    lo52 = float(close.tail(252).min()) if len(close) >= 50 else cur_p
+    dist_hi = (cur_p - hi52) / hi52 * 100 if hi52 else 0
+    dist_lo = (cur_p - lo52) / lo52 * 100 if lo52 else 0
 
     k1,k2,k3,k4,k5,k6 = st.columns(6)
-    k1.metric("Price",       f"€{cur_p:.2f}")
-    k2.metric("vs MA200",    f"{dist_ma:+.1f}%")
-    k3.metric("MA200 Trend", ma200_label)
-    k4.metric("RSI",         f"{rsi_val:.1f} {'↗' if rsi_rising else '↘'}")
-    k5.metric("MACD",        "▲ Bull" if macd_bull else "▼ Bear")
-    k6.metric("Value Score", value_label)
+    k1.metric("Price",        f"€{cur_p:.2f}", delta=f"{dist_ma:+.1f}% vs MA200")
+    k2.metric("52w High",     f"€{hi52:.2f}",  delta=f"{dist_hi:+.1f}%")
+    k3.metric("52w Low",      f"€{lo52:.2f}",  delta=f"{dist_lo:+.1f}%")
+    k4.metric("RSI",          f"{rsi_val:.1f}", delta="↗ Rising" if rsi_rising else "↘ Falling",
+              delta_color="normal" if rsi_rising else "inverse")
+    k5.metric("MACD",         "▲ Bullish" if macd_bull else "▼ Bearish",
+              delta="Accelerating" if macd_accel else None)
+    k6.metric("Value Score",  value_label)
 
     # ── Warning banners ───────────────────────────────────────────────
     if hard_flagged:
@@ -1971,6 +1989,7 @@ def render_deepdive(budget):
 
     # ── Fundamentals panel ────────────────────────────────────────────
     if not is_etf:
+        st.divider()
         st.markdown("**📊 Fundamentals**")
         def _fmt(v, mult=1, pct=False, suffix=""):
             try:
@@ -1986,26 +2005,36 @@ def render_deepdive(budget):
 
         if fund_coverage < 2:
             st.warning(
-                "⚠️ **Not enough fundamental data available for this ticker.** "
+                "⚠️ **Limited fundamental data.** "
                 "yfinance may be rate-limited or this stock has limited coverage. "
-                "Try clicking **🔄 Refresh** in a few minutes."
+                "Technical signals above are still valid."
             )
-            st.caption("Technical signals above are still valid. Fundamentals require a second attempt.")
+            st.caption("Try clicking **🔄 Refresh** in a few minutes, or use the ⚖️ Compare tab for multi-stock comparison.")
         else:
             if fund_coverage < 4:
-                st.caption(f"⚠️ Partial data — {fund_coverage}/8 fields available. Click 🔄 Refresh for more.")
-            f1,f2,f3,f4 = st.columns(4)
-            f1.metric("PE",          _fmt(pe))
-            f1.metric("P/B",         _fmt(fund_data.get("fmp_pb")))
-            f2.metric("PEG",         _fmt(fund_data.get("fmp_peg")))
-            f2.metric("FCF Yield",   _fmt(fund_data.get("fmp_fcf_yield"), mult=100, pct=True))
-            f3.metric("ROE",         _fmt(fund_data.get("fmp_roe"), mult=100, pct=True))
-            f3.metric("D/E",         _fmt(fund_data.get("fmp_debt_eq")))
-            f4.metric("Div Yield",   _fmt(div, mult=100, pct=True))
-            f4.metric("Rev Growth",  _fmt(fund_data.get("fmp_rev_growth"), mult=100, pct=True))
+                st.caption(f"⚠️ Partial data — {fund_coverage}/8 fields available.")
+
+            # Valuation row
+            st.caption("**Valuation**")
+            v1,v2,v3,v4 = st.columns(4)
+            v1.metric("P/E (TTM)",   _fmt(pe),
+                      delta="Cheap" if _pf(pe) and 0 < _pf(pe) < 15 else ("Expensive" if _pf(pe) and _pf(pe) > 40 else None),
+                      delta_color="normal" if _pf(pe) and 0 < _pf(pe) < 15 else "inverse")
+            v2.metric("P/B",         _fmt(fund_data.get("fmp_pb")))
+            v3.metric("PEG",         _fmt(fund_data.get("fmp_peg")))
+            v4.metric("FCF Yield",   _fmt(fund_data.get("fmp_fcf_yield"), mult=100, pct=True))
+
+            # Quality row
+            st.caption("**Quality**")
+            q1,q2,q3,q4 = st.columns(4)
+            q1.metric("ROE",         _fmt(fund_data.get("fmp_roe"), mult=100, pct=True))
+            q2.metric("D/E Ratio",   _fmt(fund_data.get("fmp_debt_eq")))
+            q3.metric("Rev Growth",  _fmt(fund_data.get("fmp_rev_growth"), mult=100, pct=True))
+            q4.metric("Div Yield",   _fmt(div, mult=100, pct=True))
 
         if value_available:
-            st.markdown(f"**Value Score: {value_score}/100 (Grade {value_grade})**")
+            grade_emoji = {"A":"🏆","B":"✅","C":"⚖️","D":"⚠️"}.get(value_grade,"")
+            st.markdown(f"**Overall Quality: {grade_emoji} Grade {value_grade} ({value_score}/100)**")
             if value_bdown:
                 bdown_str = " · ".join(f"{k}: {v}/100" for k,v in value_bdown.items())
                 st.caption(bdown_str)
@@ -2024,7 +2053,7 @@ def render_deepdive(budget):
 
 
 # ───────────────────────────────────────────────────────────────────
-# TAB 3 — VALUE SCREEN
+# TAB 3 — COMPARE
 # ───────────────────────────────────────────────────────────────────
 
 SP500_TOP50 = [
@@ -2035,39 +2064,61 @@ SP500_TOP50 = [
     "NOW","QCOM","GE","HON",
 ]
 
-def render_value_screen():
-    st.subheader("💎 Value Screen")
+def render_compare():
+    st.subheader("⚖️ Compare")
+    st.caption("Side-by-side fundamental comparison of multiple stocks. "
+               "Use this to validate candidates from the scanner before committing capital.")
 
-    # Load candidates from scanner
+    with st.expander("ℹ️ How to use this", expanded=False):
+        st.markdown(
+            "**What this does:** Fetches live fundamentals for multiple stocks at once and ranks them "
+            "side by side — so you can compare PE, ROE, revenue growth, FCF yield and more in one view.\n\n"
+            "**Workflow:** Run a scan → identify interesting candidates → enter their tickers here → "
+            "compare fundamentals → Deep Dive on the best ones before buying.\n\n"
+            "**Columns explained:**\n"
+            "- **Score** = overall value quality 0–100 (higher = better fundamentals)\n"
+            "- **Grade** = A (top quality) · B (solid) · C (average) · D (weak or expensive)\n"
+            "- **Coverage** = how many of 7 fundamental fields had data (higher = more reliable score)\n"
+            "- **Conviction** = external signals: analyst ratings, insider activity, short interest\n"
+            "- **Tech** = current technical signal from the scanner (BUY/WATCH/WAIT etc.)\n\n"
+            "**Tip:** Tickers can be loaded automatically from the scanner in a future update. "
+            "For now, paste them manually or use the preset buttons."
+        )
+
     col_a, col_b = st.columns([3,1])
     with col_a:
-        default_tickers = ""
         sdf = get_signals_df()
-        if st.button("📡 Load stock candidates (BUY/WATCH) from scanner"):
+        if st.button("📡 Load BUY/WATCH stocks from scanner"):
             if not sdf.empty:
                 cands = sdf[
                     (sdf["action"].isin(["BUY","WATCH"])) &
                     (sdf.get("type","Stock") != "ETF" if "type" in sdf.columns else True)
                 ]["ticker"].dropna().unique().tolist()[:100]
                 st.session_state["vs_tickers"] = ", ".join(cands)
-        if st.button("🇺🇸 Load S&P 500 Top 50"):
+    with col_b:
+        if st.button("🇺🇸 S&P 500 Top 50"):
             st.session_state["vs_tickers"] = ", ".join(SP500_TOP50)
 
     tickers_raw = st.text_area(
-        "Tickers to screen (comma-separated)",
+        "Tickers to compare (comma-separated, max 100)",
         value=st.session_state.get("vs_tickers",""),
-        height=80,
-        placeholder="AAPL, MSFT, GOOGL, META, AMZN, NVDA …",
+        height=70,
+        placeholder="e.g. AAPL, MSFT, ASML, SAP, HMC …",
     )
 
     c1,c2,c3,c4 = st.columns([2,2,1,1])
-    min_score   = c1.number_input("Min Value Score", min_value=0, max_value=100, value=20, step=5)
-    tech_filter = c2.selectbox("Require tech signal", ["Any","BUY only","BUY or WATCH"])
-    run_vs      = c3.button("🔍 Run", type="primary")
-    refresh_vs  = c4.button("🔄 Refresh Live", help="Bust fundamentals + tech cache for all listed tickers and re-run")
+    min_score   = c1.number_input("Min quality score", min_value=0, max_value=100, value=20, step=5,
+                                   help="0 = show all · 50 = solid quality · 75 = Grade A only")
+    tech_filter = c2.selectbox("Technical signal filter", ["Any","BUY only","BUY or WATCH"],
+                                help="Only show stocks with a matching signal from the scanner")
+    run_vs      = c3.button("⚖️ Compare", type="primary")
+    refresh_vs  = c4.button("🔄 Refresh", help="Re-fetch live data for all tickers")
 
     if not run_vs and not refresh_vs:
-        st.info("Enter tickers and click **Run**.")
+        st.info(
+            "Enter tickers above and click **⚖️ Compare** to fetch live fundamentals.\n\n"
+            "💡 **Tip:** You can also paste tickers directly from the scanner — just copy the ticker column values."
+        )
         return
 
     tickers = [t.strip().upper() for t in tickers_raw.replace("\n"," ").split(",") if t.strip()]
@@ -2088,7 +2139,7 @@ def render_value_screen():
                         store.pop(k, None)
         st.toast(f"🔄 Cache busted for {len(tickers)} tickers — re-fetching…")
 
-    with st.spinner(f"Fetching fundamentals for {len(tickers)} tickers…"):
+    with st.spinner(f"Fetching live fundamentals for {len(tickers)} tickers — this may take 15–30 seconds…"):
         fund_batch, timed_out = fetch_yf_fundamentals_batch(tickers, max_workers=8, timeout=5)
 
     if timed_out:
@@ -2166,7 +2217,8 @@ def render_value_screen():
     n_a  = sum(1 for r in rows if r["Grade"]=="A")
     n_b  = sum(1 for r in rows if r["Grade"]=="B")
     n_hi = sum(1 for r in rows if "HIGH" in str(r.get("Conviction","")))
-    st.success(f"✅ {len(rows)} passed · Grade A: {n_a} · Grade B: {n_b} · High conviction: {n_hi}")
+    st.success(f"⚖️ {len(rows)} stocks compared · Grade A: {n_a} · Grade B: {n_b} · High conviction: {n_hi}")
+    st.caption("Sorted by quality score. Click 🔬 Deep Dive on any row for detailed analysis and buy/sell decision.")
 
     def _style_vs(val):
         if val == "A":   return "color: #0d9488; font-weight: 700;"
@@ -2202,7 +2254,7 @@ def main():
     tab_scanner, tab_deepdive, tab_value = st.tabs([
         "🔭 Market Scanner",
         "🔬 Deep Dive",
-        "💎 Value Screen",
+        "⚖️ Compare",
     ])
 
     with tab_scanner:
@@ -2212,7 +2264,7 @@ def main():
         render_deepdive(budget)
 
     with tab_value:
-        render_value_screen()
+        render_compare()
 
 if __name__ == "__main__":
     main()
