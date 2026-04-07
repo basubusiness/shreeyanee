@@ -2561,34 +2561,28 @@ def render_compare():
 def main():
     preset, filters, budget, tickers, vix, fg, rm = render_sidebar()
 
-    # Tab switching via query params (only reliable method in Streamlit)
     tab_param = st.query_params.get("tab", "scanner")
 
-    # If Deep Dive was triggered from scanner, switch to it
     if st.session_state.get("_active_tab") == 1:
         st.session_state.pop("_active_tab", None)
         st.query_params["tab"] = "deepdive"
         tab_param = "deepdive"
-        # Toast notification — visible regardless of active tab
         dd_ticker_notify = st.session_state.get("_dd_last_ticker", "")
         if dd_ticker_notify:
-            st.toast(f"🔬 Deep Dive ready: **{dd_ticker_notify}** — switch to Deep Dive tab", icon="🔬")
+            st.toast(f"🔬 Deep Dive ready: **{dd_ticker_notify}**", icon="🔬")
 
-    tab_labels = ["🔭 Market Scanner", "🔬 Deep Dive", "⚖️ Compare"]
-    tab_scanner, tab_deepdive, tab_value = st.tabs(tab_labels)
-
-    # Tab switching via JS — retry loop handles Streamlit's async rendering
     if tab_param == "deepdive":
-        st.markdown("""<script>
-        (function switchTab() {
-            var tabs = window.parent.document.querySelectorAll('[data-baseweb="tab"]');
-            if (tabs.length >= 2) {
-                tabs[1].click();
-            } else {
-                setTimeout(switchTab, 100);
-            }
-        })();
-        </script>""", unsafe_allow_html=True)
+        tab_deepdive, tab_scanner, tab_value = st.tabs([
+            "🔬 Deep Dive", "🔭 Market Scanner", "⚖️ Compare"
+        ])
+    elif tab_param == "compare":
+        tab_value, tab_scanner, tab_deepdive = st.tabs([
+            "⚖️ Compare", "🔭 Market Scanner", "🔬 Deep Dive"
+        ])
+    else:
+        tab_scanner, tab_deepdive, tab_value = st.tabs([
+            "🔭 Market Scanner", "🔬 Deep Dive", "⚖️ Compare"
+        ])
 
     with tab_scanner:
         render_scanner(tickers, budget, vix, fg, rm)
