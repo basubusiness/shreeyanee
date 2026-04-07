@@ -29,7 +29,7 @@ except ImportError:
     FD_AVAILABLE = False
 
 
-APP_VERSION = "v11.0"
+APP_VERSION = "v11.0-local"
 BUILD_TIME = datetime.now(timezone.utc).strftime("%d %b %H:%M UTC")
 
 # ───────────────────────────────────────────────────────────────────
@@ -79,16 +79,14 @@ section[data-testid="stSidebar"] { display: block !important; }
 
 /* Metric cards */
 [data-testid="metric-container"] {
-    background: #fff;
-    border: 1px solid #e2e6ed;
+    border: 1px solid rgba(255,255,255,0.1);
     border-radius: 6px;
     padding: 12px 16px;
 }
 
-/* Sidebar */
+/* Sidebar — let Streamlit handle background, just add border */
 [data-testid="stSidebar"] {
-    background: #f8f9fc !important;
-    border-right: 1px solid #e2e6ed;
+    border-right: 1px solid rgba(255,255,255,0.1);
 }
 
 /* Signal badges */
@@ -164,42 +162,33 @@ def load_base_universe():
     """Load universe from Supabase."""
     try:
         sb = _get_supabase()
-        if sb is None:
-            return pd.DataFrame()
-        rows = []
-        page, page_size = 0, 1000
+        if sb is None: return pd.DataFrame()
+        rows, page, page_size = [], 0, 1000
         while True:
             res = sb.table("universe").select("*").range(page*page_size, (page+1)*page_size-1).execute()
-            if not res.data:
-                break
+            if not res.data: break
             rows.extend(res.data)
-            if len(res.data) < page_size:
-                break
+            if len(res.data) < page_size: break
             page += 1
-        if not rows:
-            return pd.DataFrame()
+        if not rows: return pd.DataFrame()
         df = pd.DataFrame(rows)
         for col in ["country","sector","name","category_group","category",
                     "currency","yf_symbol","yf_suffix","isin"]:
-            if col not in df.columns:
-                df[col] = ""
+            if col not in df.columns: df[col] = ""
         for col in df.columns:
             if df[col].dtype == object:
                 df[col] = df[col].fillna("").astype(str).str.strip()
-        df = df[df["ticker"].str.match(r"^[A-Z0-9]{2,6}$")]
-        return df.drop_duplicates(subset=["ticker","type"], keep="first")
-    except Exception as e:
+        return df.drop_duplicates(subset=["ticker"], keep="first")
+    except Exception:
         return pd.DataFrame()
 
 @st.cache_data(ttl=3600)
 def load_justetf():
-    """Build justETF-style df from universe table (domicile/dist_policy/ter/replication/strategy)."""
+    """Build justETF-style df from universe table."""
     try:
         df = load_base_universe()
-        if df.empty:
-            return pd.DataFrame()
+        if df.empty: return pd.DataFrame()
         etfs = df[df["type"]=="ETF"].copy()
-        # Rename name -> jname for compatibility
         if "name" in etfs.columns:
             etfs = etfs.rename(columns={"name":"jname"})
         keep = [c for c in ["ticker","isin","jname","domicile","ter",
@@ -216,39 +205,36 @@ SIGNALS_COLS = (
     "value_grade,name,isin,type,country,sector,domicile,"
     "dist_policy,ter,fund_size_eur,replication,strategy,"
     "roe,rev_growth,debt_equity,fcf_yield,peg,"
+    "analyst_target_mean,analyst_target_high,analyst_target_low,"
+    "analyst_count,analyst_rec,"
     "data_source,computed_at"
 )
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=300)
 def load_signals():
-    """Load all signals from Supabase with pagination."""
+    """Load signals from Supabase."""
     try:
         sb = _get_supabase()
-        if sb is None:
-            return pd.DataFrame()
-        rows = []
-        page_size = 1000
-        page = 0
+        if sb is None: return pd.DataFrame()
+        rows, page, page_size = [], 0, 1000
         while True:
             res = (sb.table("signals")
                      .select(SIGNALS_COLS)
-                     .range(page * page_size, (page + 1) * page_size - 1)
+                     .range(page*page_size, (page+1)*page_size-1)
                      .execute())
-            if not res.data:
-                break
+            if not res.data: break
             rows.extend(res.data)
-            if len(res.data) < page_size:
-                break
+            if len(res.data) < page_size: break
             page += 1
-        if not rows:
-            return pd.DataFrame()
+        if not rows: return pd.DataFrame()
         df = pd.DataFrame(rows)
         if "score" in df.columns:
             df = df.sort_values("score", ascending=False).drop_duplicates(
                 subset=["ticker"], keep="first").reset_index(drop=True)
         return df
-    except Exception as e:
+    except Exception:
         return pd.DataFrame()
+
 
 
 # Load disk cache at startup (safe — no st calls)
@@ -271,20 +257,14 @@ def get_signals_df():
         st.session_state["signals_df"] = load_signals()
     return st.session_state["signals_df"]
 
-def _push_signal_to_supabase(row_dict):
-    """
-    Persist an enriched signal row back to Supabase in a background thread.
-    Called after Deep Dive fetches live fundamentals — so subsequent app loads
-    show updated score/grade/fundamentals without re-fetching from yfinance.
-    Fire-and-forget: never blocks the UI.
-    """
+def _write_signal_to_db(row_dict):
+    """Persist enriched signal back to Supabase in background thread (fire-and-forget)."""
     import math, threading
 
     def _do_push():
         try:
             sb = _get_supabase()
-            if sb is None:
-                return
+            if sb is None: return
             INT_COLS = {"rsi_rising","macd_bull","macd_accel","is_knife","reversal","momentum_up"}
             SIGNAL_COLS = {
                 "ticker","action","score","price","ma50","ma200","dist_ma200","dist_52w",
@@ -295,27 +275,23 @@ def _push_signal_to_supabase(row_dict):
                 "name","isin","type","country","sector","currency","domicile","dist_policy",
                 "ter","fund_size_eur","replication","strategy","data_source","last_source",
                 "computed_at","time_updated",
+                "analyst_target_mean","analyst_target_high","analyst_target_low",
+                "analyst_count","analyst_rec",
             }
             clean = {}
             for k, v in row_dict.items():
-                if k not in SIGNAL_COLS:
-                    continue
-                if v is None:
+                if k not in SIGNAL_COLS: continue
+                if v is None or (isinstance(v, float) and (math.isnan(v) or math.isinf(v))):
                     clean[k] = None
-                elif isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
-                    clean[k] = None
-                elif isinstance(v, str) and v in ("nan","None","NaN",""):
-                    clean[k] = None
+                elif isinstance(v, str) and v in ("nan","None","NaN",""): clean[k] = None
                 elif k in INT_COLS:
                     try:    clean[k] = int(v)
                     except: clean[k] = None
-                else:
-                    clean[k] = v
-            if "ticker" not in clean:
-                return
+                else: clean[k] = v
+            if "ticker" not in clean: return
             sb.table("signals").upsert(clean, on_conflict="ticker").execute()
         except Exception:
-            pass  # never crash the UI for a background sync
+            pass
 
     threading.Thread(target=_do_push, daemon=True).start()
 
@@ -329,8 +305,7 @@ def update_signals_df(new_row_dict, source_tab=None):
     st.session_state["signals_df"] = sdf
     if source_tab:
         st.session_state["_signals_updated_by"] = source_tab
-    # Persist enriched signal back to Supabase in background (fire-and-forget)
-    _push_signal_to_supabase(new_row_dict)
+    _write_signal_to_db(new_row_dict)
 
 
 def _build_name_lookup():
@@ -810,18 +785,24 @@ def fetch_yf_fundamentals(ticker, timeout=20):
         de_ratio = (de_raw / 100) if de_raw and de_raw > 10 else de_raw
 
         result = {
-            "fmp_pe_ttm":     pe or fwd_pe,
-            "fmp_peg":        peg,
-            "fmp_pb":         pb,
-            "fmp_fcf_yield":  fcf_yield,
-            "fmp_roe":        roe,
-            "fmp_debt_eq":    de_ratio,
-            "fmp_rev_growth": rev_gr,
-            "fmp_eps_growth": eps_gr,
-            "fmp_div_yield":  div,
-            "fmp_mcap":       mcap,
-            "fmp_beta":       beta,
-            "_source":        "yfinance",
+            "fmp_pe_ttm":          pe or fwd_pe,
+            "fmp_peg":             peg,
+            "fmp_pb":              pb,
+            "fmp_fcf_yield":       fcf_yield,
+            "fmp_roe":             roe,
+            "fmp_debt_eq":         de_ratio,
+            "fmp_rev_growth":      rev_gr,
+            "fmp_eps_growth":      eps_gr,
+            "fmp_div_yield":       div,
+            "fmp_mcap":            mcap,
+            "fmp_beta":            beta,
+            # Analyst price targets
+            "analyst_target_mean": _safe_float(info.get("targetMeanPrice")),
+            "analyst_target_high": _safe_float(info.get("targetHighPrice")),
+            "analyst_target_low":  _safe_float(info.get("targetLowPrice")),
+            "analyst_count":       info.get("numberOfAnalystOpinions"),
+            "analyst_rec":         info.get("recommendationKey",""),
+            "_source":             "yfinance",
         }
         cache_set(cache_key, result, ttl=3600)
         return result
@@ -1163,9 +1144,10 @@ def render_sidebar():
         cols = st.sidebar.columns(min(len(viewed), 3))
         for i, t in enumerate(viewed[-3:]):
             if cols[i].button(t, key=f"rv_{t}", use_container_width=True):
-                st.session_state["dd_ticker"]   = t
-                st.session_state["dd_auto"]     = True
-                st.session_state["_active_tab"] = 1
+                st.session_state["dd_ticker"]       = t
+                st.session_state["dd_auto"]         = True
+                st.session_state["_dd_last_ticker"] = ""
+                st.session_state["_active_tab"]     = 1
                 st.rerun()
         st.sidebar.divider()
 
@@ -1291,12 +1273,33 @@ def classify_strategies(s):
     action= s.get("action","WAIT").fillna("WAIT").astype(str)
 
     # 🟡 CORE — ETF + stock timing signals, risk-tiered
-    is_etf  = atype.str.upper() == "ETF"
+    is_etf = atype.str.upper().isin(["ETF"])
 
-    # ── CORE risk tier classification ─────────────────────────────────
-    # Keywords that indicate speculative / volatile ETFs
-    name_col = s.get("name", pd.Series([""]*len(s))).fillna("").str.lower() if "name" in s.columns else pd.Series([""]*len(s))
-    strat_col = s.get("strategy", pd.Series([""]*len(s))).fillna("").str.lower() if "strategy" in s.columns else pd.Series([""]*len(s))
+    # ── Enrich name/strategy/ter/aum from universe for ETF classification ──
+    # signals.db often has these columns empty; universe.db is the source of truth
+    uni = get_universe()
+    s_work = s.copy()
+    if not uni.empty and "ticker" in uni.columns:
+        uni_cols = [c for c in ["ticker","name","strategy","ter","fund_size_eur"] if c in uni.columns]
+        uni_sub  = uni[uni_cols].drop_duplicates(subset=["ticker"])
+        s_work   = s_work.merge(uni_sub, on="ticker", how="left", suffixes=("","_uni"))
+        s_work   = s_work.reset_index(drop=True)
+        for col in ["name","strategy","ter","fund_size_eur"]:
+            uni_col = f"{col}_uni"
+            if uni_col in s_work.columns:
+                if col in s_work.columns:
+                    s_work[col] = s_work[col].where(
+                        s_work[col].notna() & (s_work[col].astype(str).str.strip() != ""),
+                        s_work[uni_col]
+                    )
+                else:
+                    s_work[col] = s_work[uni_col]
+                s_work = s_work.drop(columns=[uni_col])
+
+    name_col  = s_work.get("name",     pd.Series([""]*len(s_work))).fillna("").str.lower()
+    strat_col = s_work.get("strategy", pd.Series([""]*len(s_work))).fillna("").str.lower()
+    ter_col   = pd.to_numeric(s_work.get("ter",          pd.Series([np.nan]*len(s_work))), errors="coerce")
+    aum_col   = pd.to_numeric(s_work.get("fund_size_eur",pd.Series([np.nan]*len(s_work))), errors="coerce")
     combined_name = name_col + " " + strat_col
 
     speculative_kw = ["crypto","bitcoin","blockchain","ethereum","nuclear","uranium",
@@ -1305,9 +1308,6 @@ def classify_strategies(s):
     sector_kw      = ["tech","cyber","security","health","pharma","biotech","energy",
                       "clean","solar","wind","real estate","reit","financial","bank",
                       "india","china","emerging","asia","latin","africa","korea"]
-
-    ter_col  = pd.to_numeric(s.get("ter",  pd.Series([np.nan]*len(s))), errors="coerce")
-    aum_col  = pd.to_numeric(s.get("fund_size_eur", pd.Series([np.nan]*len(s))), errors="coerce")
 
     is_speculative_etf = is_etf & (
         combined_name.apply(lambda n: any(kw in n for kw in speculative_kw)) |
@@ -1332,46 +1332,62 @@ def classify_strategies(s):
     is_core = (is_etf | is_stock_core) & action.isin(["BUY","WATCH"]) & (dm < -5)
 
     # ── Has fundamental data? ─────────────────────────────────────────
-    has_fund  = rev_g.notna() | roe.notna()   # at least one fundamental present
+    has_fund  = rev_g.notna() | roe.notna()
     has_rev   = rev_g.notna()
     has_roe   = roe.notna()
 
     is_stock  = ~is_etf
     grade_ok  = vg.isin(["A","B"])
 
+    # ── Price slope proxy (for momentum fallback when rev_growth missing) ──
+    # Use dist_ma200 trend as a proxy: if a stock is near/above MA200 and
+    # RSI is rising, it's showing price strength even without revenue data
+    ma_bull   = pd.to_numeric(s.get("macd_accel", 0), errors="coerce").fillna(0) > 0
+    rsi_num   = pd.to_numeric(s.get("rsi_rising", 0), errors="coerce").fillna(0)
+    price_strong = (dm > -8) & (mb > 0) & ma_bull & (rsi_num > 0)  # near/above MA200, accelerating
+
     # 🔵 VALUE — two tiers:
     # Tier 1 (full): oversold + Grade A/B + ROE >10% + positive revenue growth
     # Tier 2 (tech-only): oversold + strong technicals when fundamentals missing
-    roe_ok   = has_roe & (roe > 0.10)
-    rev_ok   = has_rev & (rev_g > 0)
+    roe_ok     = has_roe & (roe > 0.10)
+    rev_ok     = has_rev & (rev_g > 0)
     value_full = (is_stock & (dm < -10) & (rsi < 48) & (mb > 0)
                   & grade_ok & roe_ok & rev_ok & action.isin(["BUY","WATCH"]))
     value_tech = (is_stock & (dm < -15) & (rsi < 40) & (mb > 0)
                   & ~has_fund & action.isin(["BUY","WATCH"]))
     is_value   = value_full | value_tech
 
-    # 🔴 MOMENTUM — require actual revenue growth >20%
-    rev_high    = has_rev & (rev_g > 0.20)
-    is_momentum = (is_stock
-                   & (dm > -5)
-                   & (rsi >= 50) & (rsi <= 72)
-                   & (mb > 0)
-                   & rev_high
-                   & action.isin(["BUY","WATCH","SELL"]))
+    # 🔴 MOMENTUM — revenue growth >20% required; fallback to price slope when missing
+    rev_high        = has_rev & (rev_g > 0.20)
+    momentum_growth = (is_stock & (dm > -5) & (rsi >= 50) & (rsi <= 72)
+                       & (mb > 0) & rev_high & action.isin(["BUY","WATCH","SELL"]))
+    momentum_price  = (is_stock & (dm > -8) & (rsi >= 48) & (rsi <= 72)
+                       & (mb > 0) & price_strong & ~has_rev  # only when no rev data
+                       & action.isin(["BUY","WATCH","SELL"]))
+    is_momentum = momentum_growth | momentum_price
 
-    # ⚡ DARK HORSE — require actual revenue growth >15%
+    # ⚡ DARK HORSE — two modes, three sub-buckets
     rev_pos      = has_rev & (rev_g > 0.15)
     rsi_rec      = (rsi >= 28) & (rsi < 48)
-    is_darkhorse = (is_stock
-                    & (dm < -15)
-                    & rsi_rec
-                    & (mb > 0)
-                    & rev_pos
-                    & ~grade_ok
-                    & action.isin(["BUY","WATCH"]))
+    tech_strong  = (dm < -15) & rsi_rec & (mb > 0)  # deep dip with technical recovery
 
-    # De-duplicate: if stock qualifies for both value and darkhorse → value wins
-    is_darkhorse = is_darkhorse & ~is_value
+    # Mode A: growth-led (revenue confirmed, technicals recovering)
+    dh_mode_a = (is_stock & tech_strong & rev_pos & ~grade_ok & action.isin(["BUY","WATCH"]))
+    # Mode B: technical turnaround (strong technicals, no/low revenue data yet)
+    dh_mode_b = (is_stock & tech_strong & ~has_rev & (dm < -20) & action.isin(["BUY","WATCH"]))
+
+    is_darkhorse = dh_mode_a | dh_mode_b
+
+    # Sub-bucket labels for display
+    dh_bucket = np.where(dh_mode_a & dh_mode_b, "🎯 Confirmed",
+                np.where(dh_mode_a,              "💡 Growth Emerging",
+                np.where(dh_mode_b,              "📈 Technical Turnaround",
+                "")))
+
+    # 2. De-duplicate: Momentum wins over Value for dual-qualified stocks
+    is_value     = is_value & ~is_momentum
+    # Dark Horse excluded from Value and Momentum
+    is_darkhorse = is_darkhorse & ~is_value & ~is_momentum
 
     s = s.copy()
     s["is_core"]      = is_core.values
@@ -1379,6 +1395,7 @@ def classify_strategies(s):
     s["is_value"]     = is_value.values
     s["is_momentum"]  = is_momentum.values
     s["is_darkhorse"] = is_darkhorse.values
+    s["dh_bucket"]    = dh_bucket
     return s
 
 
@@ -1413,10 +1430,11 @@ def build_result_df(sig, budget, fg, rm):
     rg  = pd.to_numeric(s.get("rev_growth", pd.Series([np.nan]*len(s))), errors="coerce")
     rg_str = (rg*100).round(0).astype("Int64").astype(str).replace("<NA>","—") + "% rev"
     core_risk_col = s.get("core_risk", pd.Series([""]*len(s))).fillna("").astype(str)
+    dh_bucket_col = s.get("dh_bucket", pd.Series([""]*len(s))).fillna("").astype(str)
     driver = np.where(s.get("is_core",  False), "Dip · " + core_risk_col,
              np.where(s.get("is_value", False), "Value · Gr." + vg.values,
              np.where(s.get("is_momentum",False), "Momentum · " + rg_str.values,
-             np.where(s.get("is_darkhorse",False), "Dark horse · " + rg_str.values,
+             np.where(s.get("is_darkhorse",False), dh_bucket_col + " · " + rg_str.values,
              "—"))))
 
     result_df = pd.DataFrame({
@@ -1440,7 +1458,18 @@ def build_result_df(sig, budget, fg, rm):
         "_value":     s.get("is_value",     pd.Series([False]*len(s))).values,
         "_momentum":  s.get("is_momentum",  pd.Series([False]*len(s))).values,
         "_darkhorse": s.get("is_darkhorse", pd.Series([False]*len(s))).values,
+        "dh_bucket":  s.get("dh_bucket",   pd.Series([""]*len(s))).fillna("").values,
     })
+
+    # Compute Upside% from analyst target — shown as "+31%" or "—"
+    price_s  = pd.to_numeric(s.get("price",  pd.Series([np.nan]*len(s))), errors="coerce")
+    target_s = pd.to_numeric(s.get("analyst_target_mean", pd.Series([np.nan]*len(s))), errors="coerce")
+    upside_raw = ((target_s - price_s) / price_s * 100).where(
+        target_s.notna() & price_s.notna() & (price_s > 0)
+    )
+    result_df["Upside%"]  = upside_raw.round(1)
+    result_df["_upside"]  = upside_raw  # numeric, for sorting
+
     return result_df
 
 
@@ -1450,8 +1479,16 @@ def _show_strategy_table(df, label, color, empty_msg):
         st.info(empty_msg)
         return
 
-    display = [c for c in df.columns if not c.startswith("_")]
+    display = [c for c in df.columns if not c.startswith("_") and c != "dh_bucket"]
     df_edit = df[display].copy()
+
+    # Format Upside% as string with sign
+    if "Upside%" in df_edit.columns:
+        df_edit["Upside%"] = df_edit["Upside%"].apply(
+            lambda v: f"+{v:.1f}%" if pd.notna(v) and v > 0
+                      else (f"{v:.1f}%" if pd.notna(v) else "—")
+        )
+
     df_edit.insert(0, "🔬", False)
 
     def _style(val):
@@ -1463,9 +1500,18 @@ def _show_strategy_table(df, label, color, empty_msg):
         if str(val).startswith("🔴"): return "color:#dc2626;font-weight:600;"
         if val == "▲": return "color:#0d9488;"
         if val == "▼": return "color:#dc2626;"
+        # Upside% colouring
+        if isinstance(val, str) and val.startswith("+") and "%" in val:
+            try:
+                pct = float(val.replace("+","").replace("%",""))
+                if pct >= 30: return "color:#0d9488;font-weight:700;"
+                if pct >= 10: return "color:#0d9488;"
+            except: pass
+        if isinstance(val, str) and val.startswith("-") and "%" in val:
+            return "color:#dc2626;"
         return ""
 
-    style_cols = [c for c in ["Signal","Grade","MACD","Risk"] if c in display]
+    style_cols = [c for c in ["Signal","Grade","MACD","Risk","Upside%"] if c in display]
 
     # ── Dive button placeholder sits ABOVE the table ──────────────────
     dive_area = st.empty()
@@ -1487,9 +1533,10 @@ def _show_strategy_table(df, label, color, empty_msg):
         with dive_area:
             if st.button(f"🔬 Deep Dive: {ticker}", type="primary",
                          key=f"dive_{label}_{ticker}", use_container_width=True):
-                st.session_state["dd_ticker"]   = ticker
-                st.session_state["dd_auto"]     = True
-                st.session_state["_active_tab"] = 1  # switch to Deep Dive tab
+                st.session_state["dd_ticker"]      = ticker
+                st.session_state["dd_auto"]        = True
+                st.session_state["_dd_last_ticker"] = ""   # clear so new ticker always runs
+                st.session_state["_active_tab"]    = 1
                 st.rerun()
 
     csv = df[display].to_csv(index=False).encode("utf-8")
@@ -1672,7 +1719,12 @@ def render_scanner(tickers, budget, vix, fg, rm):
                 "**Grade** = quality score from PE, P/B, Free Cash Flow, ROE, Debt, and Revenue growth. A = top quality. D = weak or expensive.\n\n"
                 "**What to do:** Medium-term holds (6–18 months). The idea is the price recovers toward fair value as the market recognises the quality."
             )
-        df_val = result_df[result_df["_value"]].sort_values("Score", ascending=False).reset_index(drop=True)
+        df_val = result_df[result_df["_value"]].copy()
+        df_val = df_val.sort_values(
+            ["_upside", "Score"],
+            ascending=[False, False],
+            na_position="last"
+        ).reset_index(drop=True)
         df_val.insert(0,"#",range(1,len(df_val)+1))
         _show_strategy_table(df_val, "Value", "#0284c7",
             "No value signals in this filter set. Needs Grade A/B + oversold technicals + fundamental data. Try Global Stocks or US Stocks preset.")
@@ -1686,7 +1738,12 @@ def render_scanner(tickers, budget, vix, fg, rm):
                 "**Key difference from Value:** Value buys dips. Momentum buys strength. A stock appearing here would likely fail the Value screen — that's intentional.\n\n"
                 "**Risk:** Momentum reverses sharply. Needs more active monitoring than Value picks."
             )
-        df_mom = result_df[result_df["_momentum"]].sort_values("Score", ascending=False).reset_index(drop=True)
+        df_mom = result_df[result_df["_momentum"]].copy()
+        df_mom = df_mom.sort_values(
+            ["_upside", "Score"],
+            ascending=[False, False],
+            na_position="last"
+        ).reset_index(drop=True)
         df_mom.insert(0,"#",range(1,len(df_mom)+1))
         _show_strategy_table(df_mom, "Momentum", "#dc2626",
             "No momentum signals yet. This strategy requires revenue growth data (>20%) which needs the fundamentals rebuild. "
@@ -1697,15 +1754,37 @@ def render_scanner(tickers, budget, vix, fg, rm):
         with st.expander("ℹ️ How does this work?", expanded=False):
             st.markdown(
                 "**What this tab shows:** Companies the market has punished, but whose revenue is still growing fast.\n\n"
-                "**To qualify (ALL must pass):** 15%+ below 200-day average · RSI 28–48 recovering · MACD turning bullish · Revenue growing 15%+ · NOT Grade A/B.\n\n"
-                "**Why not Grade A/B?** Those go to Value. Dark Horses are the riskier version — growth story may be real, financials aren't as clean.\n\n"
-                "**Be realistic:** Most dark horses don't come good. Use smaller position sizes. RevGr% is the critical column — no growth = not a dark horse, just a broken stock."
+                "**Three sub-buckets:**\n"
+                "- 🎯 **Confirmed** — both revenue growth >15% AND strong technical recovery (highest conviction)\n"
+                "- 💡 **Growth Emerging** — revenue growing >15% but technicals still weak (wait for confirmation)\n"
+                "- 📈 **Technical Turnaround** — strong technical recovery but no revenue data yet (higher risk)\n\n"
+                "**To qualify:** 15%+ below 200-day average · RSI 28–48 recovering · MACD turning bullish · NOT Grade A/B (those go to Value).\n\n"
+                "**Be realistic:** Most dark horses don't come good. Size smaller. 🎯 Confirmed is the only sub-bucket worth full position sizing."
             )
-        df_dh = result_df[result_df["_darkhorse"]].sort_values("Score", ascending=False).reset_index(drop=True)
-        df_dh.insert(0,"#",range(1,len(df_dh)+1))
-        _show_strategy_table(df_dh, "Dark Horse", "#7c3aed",
-            "No dark horse signals yet. This strategy requires revenue growth data (>15%) from the fundamentals rebuild. "
-            "Once fundamentals are loaded, beaten-down high-growth companies will appear here.")
+        df_dh = result_df[result_df["_darkhorse"]].copy()
+
+        # Show sub-buckets separately
+        for bucket_label, bucket_icon, bucket_desc in [
+            ("🎯 Confirmed",           "🎯", "Both revenue growth and technical recovery confirmed — highest conviction."),
+            ("💡 Growth Emerging",     "💡", "Revenue growing but technicals not yet confirmed — wait for MACD to strengthen."),
+            ("📈 Technical Turnaround","📈", "Technical recovery visible but no revenue data yet — higher risk, smaller size."),
+        ]:
+            bucket_df = df_dh[df_dh["dh_bucket"] == bucket_label].copy()
+            bucket_df = bucket_df.sort_values(
+                ["_upside", "Score"],
+                ascending=[False, False],
+                na_position="last"
+            ).reset_index(drop=True)
+            if bucket_df.empty:
+                continue
+            st.markdown(f"**{bucket_label}** — {bucket_desc}")
+            bucket_df.insert(0, "#", range(1, len(bucket_df)+1))
+            _show_strategy_table(bucket_df, f"Dark Horse {bucket_icon}", "#7c3aed",
+                f"No {bucket_label} signals.")
+
+        if df_dh.empty:
+            st.info("No dark horse signals yet. This strategy requires revenue growth data (>15%) from the fundamentals rebuild. "
+                    "Once fundamentals are loaded, beaten-down high-growth companies will appear here.")
 
     with tab_live:
         st.caption("Best picks across all strategies — one view, ranked and interleaved.")
@@ -1747,30 +1826,25 @@ def render_deepdive(budget):
 
     c1, c2, c3, c4 = st.columns([4, 1, 1, 1])
     ticker_input = c1.text_input("Ticker or ISIN", placeholder="e.g. VWRA or IE00B3RBWM25",
-                                  value=st.session_state.get("_dd_last_ticker", ""))
+                                  value=st.session_state.pop("dd_ticker", "") or "")
     budget_dd    = c2.number_input("Budget (EUR)", min_value=100, value=budget, step=100)
     analyse_btn  = c3.button("🔍 Analyse", type="primary")
     refresh_btn  = c4.button("🔄 Refresh", help="Force live re-fetch, busting all caches for this ticker")
 
-    # Allow clicking from scanner
-    if "dd_ticker" in st.session_state and not ticker_input:
-        ticker_input = st.session_state["dd_ticker"]
-
-    # Auto-trigger from scanner checkbox
+    # Auto-trigger from scanner (dd_auto already popped above via dd_ticker)
     auto_dive = st.session_state.pop("dd_auto", False)
-    if not ticker_input and "dd_ticker" in st.session_state:
-        ticker_input = st.session_state["dd_ticker"]
 
     # Re-render last analysis on rerun (e.g. triggered by Compare tab update)
     if not analyse_btn and not refresh_btn and not auto_dive:
-        if ticker_input and ticker_input == st.session_state.get("_dd_last_ticker"):
+        if ticker_input and ticker_input.strip().upper() == st.session_state.get("_dd_last_ticker"):
             analyse_btn = True  # silently re-trigger with cached data
-        else:
+        elif not ticker_input:
             st.info("Enter a ticker or ISIN and click **Analyse**.")
             return
+        # If ticker_input changed from last — fall through to run with new ticker
 
     ticker       = ticker_input.strip().upper()
-    force_refr   = refresh_btn
+    force_refr   = refresh_btn  # always force-refresh on Refresh button
     st.session_state["_dd_last_ticker"] = ticker  # persist so reruns re-render
 
     # Track viewed tickers
@@ -1875,7 +1949,24 @@ def render_deepdive(budget):
     if is_etf: caption_parts.append("ETF")
     else: caption_parts.append("Stock")
     caption_parts.append(f"Updated: {date.today().strftime('%d %b %Y')}")
-    st.caption("  ·  ".join(caption_parts))
+
+    # External links
+    # Use yf_symbol from universe if available (most reliable)
+    uni_row = get_universe()[get_universe()["ticker"] == ticker] if not get_universe().empty else pd.DataFrame()
+    yf_sym_raw = str(uni_row.iloc[0].get("yf_symbol","")).strip() if not uni_row.empty else ""
+    if not yf_sym_raw or yf_sym_raw in ("nan","None",""):
+        # Fallback: only replace dot for Berkshire-style class shares (e.g. BRK.B -> BRK-B)
+        yf_sym_raw = ticker
+    yf_link_sym = yf_sym_raw.replace(".", "-") if len(yf_sym_raw) <= 5 and "." in yf_sym_raw else yf_sym_raw
+
+    if is_etf and isin:
+        ext_link = f"[justETF ↗](https://www.justetf.com/en/etf-profile.html?isin={isin})"
+    elif is_etf:
+        ext_link = f"[justETF ↗](https://www.justetf.com/en/find-etf.html?search={ticker})"
+    else:
+        ext_link = f"[Yahoo Finance ↗](https://finance.yahoo.com/quote/{yf_link_sym})"
+
+    st.markdown("  ·  ".join(caption_parts) + "  ·  " + ext_link)
 
     ma200_label = {"rising":"↗ Rising","falling":"↘ Falling","flat":"→ Flat"}.get(ma200_trend,"→ Flat")
     value_label = f"{value_score}/100 (Grade {value_grade})" if value_available else "—"
@@ -1923,6 +2014,11 @@ def render_deepdive(budget):
         if value_grade == "D": return f" · ⚠️ Expensive ({value_score}/100)"
         return ""
 
+    # Pre-compute upside for use in Buy decision
+    _analyst_mean_pre  = _safe_float(fund_data.get("analyst_target_mean"))
+    _analyst_upside_pre = ((_analyst_mean_pre - cur_p) / cur_p * 100) if _analyst_mean_pre and cur_p else None
+    _limited_upside = _analyst_upside_pre is not None and _analyst_upside_pre < 10
+
     entry = "TRIGGER" if action == "BUY" else ("WATCH" if action == "WATCH" else "WAIT")
 
     col_buy, col_sell = st.columns(2)
@@ -1932,6 +2028,9 @@ def render_deepdive(budget):
             st.error("⛔ AVOID — Leveraged/inverse. Not suitable for dip buying.")
         elif is_knife and not reversal:
             st.error("⛔ AVOID — Falling knife. Wait for reversal.")
+        elif _limited_upside:
+            st.warning(f"⚠️ LIMITED UPSIDE — Analyst consensus target only {_analyst_upside_pre:.1f}% above current price. "
+                       f"Signal is {action} but reward may not justify the risk.")
         elif entry == "WAIT":
             st.warning("⏳ WAIT — Still falling. Let it stabilise.")
         elif entry == "WATCH":
@@ -2051,25 +2150,13 @@ def render_deepdive(budget):
                             if fund_data.get(k) is not None
                             and str(fund_data.get(k)) not in ("nan","None",""))
 
-        # Debug expander — remove once fundamentals are confirmed working
-        with st.expander("🔧 Debug: fundamentals fetch", expanded=fund_coverage < 2):
-            st.write(f"**is_etf:** {is_etf}")
-            st.write(f"**fund_coverage:** {fund_coverage}/8")
-            st.write(f"**fund_data keys:** {list(fund_data.keys())}")
-            err = cache_get(f"yfund_err_{ticker}")
-            if err:
-                st.error(f"**Last fetch error:** {err}")
-            else:
-                st.success("No fetch errors recorded")
-            st.json({k: str(v) for k, v in fund_data.items()})
-
         if fund_coverage < 2:
             st.warning(
                 "⚠️ **Limited fundamental data.** "
                 "yfinance may be rate-limited or this stock has limited coverage. "
                 "Technical signals above are still valid."
             )
-            st.caption("Try clicking **🔄 Refresh** in a few minutes, or use the ⚖️ Compare tab for multi-stock comparison.")
+            st.caption("Try clicking **🔄 Refresh** in a few minutes.")
         else:
             if fund_coverage < 4:
                 st.caption(f"⚠️ Partial data — {fund_coverage}/8 fields available.")
@@ -2099,17 +2186,124 @@ def render_deepdive(budget):
                 bdown_str = " · ".join(f"{k}: {v}/100" for k,v in value_bdown.items())
                 st.caption(bdown_str)
 
-    # Write back to session signals_df (tagged so Compare tab doesn't re-trigger)
-    update_signals_df({
-        "ticker": ticker, "data_source": "live_deepdive",
-        "price": cur_p, "ma200": raw["ma200"],
-        "dist_ma200": dist_ma, "rsi": rsi_val,
-        "rsi_rising": int(rsi_rising), "macd_bull": int(macd_bull),
-        "macd_accel": int(macd_accel), "vol_pct": raw["vol"],
-        "conf": raw["confidence"], "action": action, "score": score,
-        "is_knife": int(is_knife), "reversal": int(reversal),
+    # ── Upside Potential panel ────────────────────────────────────────
+    if not is_etf:
+        st.divider()
+        st.markdown("**🎯 Upside Potential**")
+
+        # Mean reversion upside (always available)
+        reversion_upside = -dist_ma  # dist_ma is negative when below MA200
+        target_ma200     = raw["ma200"]
+        target_52w       = hi52
+
+        # Analyst targets (from yfinance)
+        analyst_mean  = _safe_float(fund_data.get("analyst_target_mean"))
+        analyst_high  = _safe_float(fund_data.get("analyst_target_high"))
+        analyst_low   = _safe_float(fund_data.get("analyst_target_low"))
+        analyst_count = fund_data.get("analyst_count")
+        analyst_rec   = str(fund_data.get("analyst_rec","")).lower()
+
+        analyst_upside = ((analyst_mean - cur_p) / cur_p * 100) if analyst_mean and cur_p else None
+
+        # 52w high shown as "gain needed to reach it" — consistent upside framing
+        gain_to_52w_high = ((hi52 - cur_p) / cur_p * 100) if hi52 and cur_p else 0
+
+        # Upside summary metrics
+        u1, u2, u3, u4 = st.columns(4)
+        u1.metric(
+            "To MA200",
+            f"{reversion_upside:+.1f}%",
+            delta=f"Target ~€{target_ma200:.2f}",
+            delta_color="normal" if reversion_upside > 0 else "inverse"
+        )
+        u2.metric(
+            "To 52w High",
+            f"+{gain_to_52w_high:.1f}%" if gain_to_52w_high > 0 else f"{gain_to_52w_high:.1f}%",
+            delta=f"High ~€{target_52w:.2f}",
+            delta_color="normal" if gain_to_52w_high > 0 else "off"
+        )
+        if analyst_mean:
+            u3.metric(
+                "Analyst Target",
+                f"{analyst_upside:+.1f}%" if analyst_upside is not None else "—",
+                delta=f"€{analyst_mean:.2f} mean · {analyst_count or '?'} analysts",
+                delta_color="normal" if (analyst_upside or 0) > 10 else "inverse"
+            )
+            rec_label = analyst_rec.replace("_"," ").title() if analyst_rec else "—"
+            range_label = f"€{analyst_low:.2f} – €{analyst_high:.2f}" if analyst_low and analyst_high else "—"
+            with u4:
+                st.metric("Target Range", range_label)
+                st.caption(f"Rec: **{rec_label}**")
+        else:
+            u3.metric("Analyst Target", "—", delta="No coverage data")
+            u4.metric("Target Range",   "—")
+
+        # Upside verdict
+        if analyst_upside is not None:
+            if analyst_upside < 5:
+                st.warning(f"⚠️ **Limited upside** — analysts see only {analyst_upside:.1f}% to consensus target. "
+                           f"The dip may already be priced in.")
+            elif analyst_upside < 15:
+                st.info(f"📊 **Moderate upside** — {analyst_upside:.1f}% to analyst consensus. "
+                        f"Reasonable but not exceptional.")
+            else:
+                st.success(f"🚀 **Strong upside** — {analyst_upside:.1f}% to analyst consensus target of €{analyst_mean:.2f}. "
+                           f"Analysts see significant recovery potential.")
+        else:
+            # Fall back to MA200 reversion
+            if reversion_upside < 5:
+                st.info(f"📊 Stock is near its MA200 — limited mean reversion upside ({reversion_upside:.1f}%).")
+            elif reversion_upside > 15:
+                st.success(f"📈 **{reversion_upside:.1f}% upside** to MA200 — meaningful mean reversion potential.")
+            else:
+                st.info(f"📊 {reversion_upside:.1f}% upside to MA200.")
+            st.caption("No analyst coverage data available. Upside based on MA200 mean reversion.")
+
+    # ── Write everything back to signals.db synchronously ────────────
+    # Technicals change daily, fundamentals quarterly, analyst targets monthly.
+    # All written on every Deep Dive — single source of truth, no async, no data loss.
+
+    full_writeback = {
+        "ticker":      ticker,
+        "data_source": "live_deepdive",
         "computed_at": date.today().isoformat(),
-    }, source_tab="deepdive")
+        # Technicals
+        "price":       cur_p,
+        "ma200":       raw["ma200"],
+        "dist_ma200":  dist_ma,
+        "rsi":         rsi_val,
+        "rsi_rising":  int(rsi_rising),
+        "macd_bull":   int(macd_bull),
+        "macd_accel":  int(macd_accel),
+        "vol_pct":     raw["vol"],
+        "conf":        raw["confidence"],
+        "action":      action,
+        "score":       score,
+        "is_knife":    int(is_knife),
+        "reversal":    int(reversal),
+        # Fundamentals
+        "pe_ratio":    _pf(fund_data.get("fmp_pe_ttm")),
+        "div_yield":   _pf(fund_data.get("fmp_div_yield")),
+        "market_cap":  _pf(fund_data.get("fmp_mcap")),
+        "beta":        _pf(fund_data.get("fmp_beta")),
+        "pb_ratio":    _pf(fund_data.get("fmp_pb")),
+        "roe":         _pf(fund_data.get("fmp_roe")),
+        "debt_equity": _pf(fund_data.get("fmp_debt_eq")),
+        "fcf_yield":   _pf(fund_data.get("fmp_fcf_yield")),
+        "rev_growth":  _pf(fund_data.get("fmp_rev_growth")),
+        "peg":         _pf(fund_data.get("fmp_peg")),
+        "value_score": value_score if value_available else None,
+        "value_grade": value_grade if value_available else None,
+        # Analyst targets
+        "analyst_target_mean": _pf(fund_data.get("analyst_target_mean")),
+        "analyst_target_high": _pf(fund_data.get("analyst_target_high")),
+        "analyst_target_low":  _pf(fund_data.get("analyst_target_low")),
+        "analyst_count":       fund_data.get("analyst_count"),
+        "analyst_rec":         fund_data.get("analyst_rec"),
+    }
+
+    # Persist to Supabase via update_signals_df (handles upsert)
+    update_signals_df(full_writeback, source_tab="deepdive")
 
 
 # ───────────────────────────────────────────────────────────────────
@@ -2176,6 +2370,7 @@ def render_compare():
     refresh_vs  = c4.button("🔄 Refresh", help="Re-fetch live data for all tickers")
 
     if not run_vs and not refresh_vs:
+        # Re-display cached results if available, otherwise show prompt
         cached = st.session_state.get("_compare_results")
         if cached is not None:
             df_out, summary = cached
@@ -2302,6 +2497,8 @@ def render_compare():
     n_b  = sum(1 for r in rows if r["Grade"]=="B")
     n_hi = sum(1 for r in rows if "HIGH" in str(r.get("Conviction","")))
     summary = f"⚖️ {len(rows)} stocks compared · Grade A: {n_a} · Grade B: {n_b} · High conviction: {n_hi}"
+
+    # Cache results so reruns (from scanner/deepdive) don't reset this tab
     st.session_state["_compare_results"] = (df_out, summary)
 
     st.success(summary)
@@ -2335,24 +2532,33 @@ def render_compare():
 def main():
     preset, filters, budget, tickers, vix, fg, rm = render_sidebar()
 
+    # Tab switching via query params (only reliable method in Streamlit)
     tab_param = st.query_params.get("tab", "scanner")
+
+    # If Deep Dive was triggered from scanner, switch to it
     if st.session_state.get("_active_tab") == 1:
         st.session_state.pop("_active_tab", None)
         st.query_params["tab"] = "deepdive"
         tab_param = "deepdive"
+        # Toast notification — visible regardless of active tab
+        dd_ticker_notify = st.session_state.get("_dd_last_ticker", "")
+        if dd_ticker_notify:
+            st.toast(f"🔬 Deep Dive ready: **{dd_ticker_notify}** — switch to Deep Dive tab", icon="🔬")
 
-    tab_scanner, tab_deepdive, tab_value = st.tabs([
-        "🔭 Market Scanner",
-        "🔬 Deep Dive",
-        "⚖️ Compare",
-    ])
+    tab_labels = ["🔭 Market Scanner", "🔬 Deep Dive", "⚖️ Compare"]
+    tab_scanner, tab_deepdive, tab_value = st.tabs(tab_labels)
 
+    # Tab switching via JS — retry loop handles Streamlit's async rendering
     if tab_param == "deepdive":
         st.markdown("""<script>
-        window.addEventListener('load', function() {
+        (function switchTab() {
             var tabs = window.parent.document.querySelectorAll('[data-baseweb="tab"]');
-            if (tabs.length >= 2) { tabs[1].click(); }
-        });
+            if (tabs.length >= 2) {
+                tabs[1].click();
+            } else {
+                setTimeout(switchTab, 100);
+            }
+        })();
         </script>""", unsafe_allow_html=True)
 
     with tab_scanner:
