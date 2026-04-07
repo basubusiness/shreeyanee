@@ -2041,6 +2041,24 @@ def render_deepdive(budget):
                             if fund_data.get(k) is not None
                             and str(fund_data.get(k)) not in ("nan","None",""))
 
+        # Debug expander — remove once fundamentals are confirmed working
+        with st.expander("🔧 Debug: fundamentals fetch", expanded=False):
+            st.write(f"**is_etf:** {is_etf}")
+            st.write(f"**fund_coverage:** {fund_coverage}/8")
+            st.write(f"**fund_data keys:** {list(fund_data.keys())}")
+            st.write(f"**fund_data values:**")
+            st.json({k: str(v) for k, v in fund_data.items()})
+            # Try a live fetch right now and show raw result
+            if st.button("🔄 Re-fetch fundamentals now"):
+                import yfinance as _yf
+                try:
+                    _t = _yf.Ticker(ticker)
+                    _info = _t.get_info()
+                    st.write(f"Raw get_info() → {len(_info)} keys")
+                    st.write({k: _info[k] for k in ["trailingPE","marketCap","priceToBook","returnOnEquity","revenueGrowth"] if k in _info})
+                except Exception as _e:
+                    st.error(f"get_info() failed: {_e}")
+
         if fund_coverage < 2:
             st.warning(
                 "⚠️ **Limited fundamental data.** "
