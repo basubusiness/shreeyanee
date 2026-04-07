@@ -767,6 +767,7 @@ def fetch_yf_fundamentals(ticker, timeout=20):
     cached = cache_get(cache_key)
     if cached is not None:
         return cached
+    last_error = None
     try:
         t = yf.Ticker(ticker)
         info = {}
@@ -776,9 +777,12 @@ def fetch_yf_fundamentals(ticker, timeout=20):
                 info = raw() if callable(raw) else raw
                 if info and len(info) > 5:
                     break
-            except Exception:
+            except Exception as e:
+                last_error = f"{method}: {e}"
                 continue
         if not info:
+            # Store the error so debug UI can surface it
+            cache_set(f"yfund_err_{ticker}", str(last_error), ttl=300)
             return {}
 
         def _get(*keys):
@@ -819,10 +823,10 @@ def fetch_yf_fundamentals(ticker, timeout=20):
             "fmp_beta":       beta,
             "_source":        "yfinance",
         }
-        if result:
-            cache_set(cache_key, result, ttl=3600)
+        cache_set(cache_key, result, ttl=3600)
         return result
-    except Exception:
+    except Exception as e:
+        cache_set(f"yfund_err_{ticker}", str(e), ttl=300)
         return {}
 
 def fetch_yf_fundamentals_batch(tickers, max_workers=8, timeout=20):
@@ -2042,22 +2046,16 @@ def render_deepdive(budget):
                             and str(fund_data.get(k)) not in ("nan","None",""))
 
         # Debug expander — remove once fundamentals are confirmed working
-        with st.expander("🔧 Debug: fundamentals fetch", expanded=False):
+        with st.expander("🔧 Debug: fundamentals fetch", expanded=fund_coverage < 2):
             st.write(f"**is_etf:** {is_etf}")
             st.write(f"**fund_coverage:** {fund_coverage}/8")
             st.write(f"**fund_data keys:** {list(fund_data.keys())}")
-            st.write(f"**fund_data values:**")
+            err = cache_get(f"yfund_err_{ticker}")
+            if err:
+                st.error(f"**Last fetch error:** {err}")
+            else:
+                st.success("No fetch errors recorded")
             st.json({k: str(v) for k, v in fund_data.items()})
-            # Try a live fetch right now and show raw result
-            if st.button("🔄 Re-fetch fundamentals now"):
-                import yfinance as _yf
-                try:
-                    _t = _yf.Ticker(ticker)
-                    _info = _t.get_info()
-                    st.write(f"Raw get_info() → {len(_info)} keys")
-                    st.write({k: _info[k] for k in ["trailingPE","marketCap","priceToBook","returnOnEquity","revenueGrowth"] if k in _info})
-                except Exception as _e:
-                    st.error(f"get_info() failed: {_e}")
 
         if fund_coverage < 2:
             st.warning(
