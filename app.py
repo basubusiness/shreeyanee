@@ -524,11 +524,21 @@ def fetch_ticker_data(ticker, isin=None, force_refresh=False):
 
         df = pd.DataFrame()
         used_sym = ticker
-        for _src, _sym in _attempts:
-            df = _fetch_history(_sym)
+
+        # For ETFs with ISIN — try justETF first (live price, most reliable for European ETFs)
+        if isin and len(str(isin)) == 12:
+            df = fetch_justetf_chart(isin)
             if _valid(df):
-                used_sym = _sym
-                break
+                used_sym = ticker
+                cache_set(f"sfx_{ticker}", "", ttl=86400)
+
+        # yfinance attempts
+        if not _valid(df):
+            for _src, _sym in _attempts:
+                df = _fetch_history(_sym)
+                if _valid(df):
+                    used_sym = _sym
+                    break
 
         if _valid(df):
             cache_set(f"sfx_{ticker}", used_sym[len(ticker):], ttl=86400*7)
@@ -544,7 +554,7 @@ def fetch_ticker_data(ticker, isin=None, force_refresh=False):
                     cache_set(f"sfx_{ticker}", sfx, ttl=86400*7)
                     break
 
-        # ISIN search / justETF fallback
+        # justETF final fallback
         if not _valid(df) and isin:
             df = fetch_justetf_chart(isin)
         if not _valid(df):
@@ -602,7 +612,10 @@ def fetch_ticker_data(ticker, isin=None, force_refresh=False):
             ma200_s=ma200_s_full,
             rsi_s=rsi_s, macd_l=macd_l, macd_sig=macd_sig, macd_h=macd_h,
         )
-        cache_set(key, result, ttl=3600)
+        # ETFs via justETF: 5s cache (effectively live)
+        # Stocks via yfinance: 1hr cache (end-of-day data)
+        _ttl = 5 if (isin and used_sym == ticker) else 3600
+        cache_set(key, result, ttl=_ttl)
         return result
     except Exception:
         return None
@@ -1882,15 +1895,30 @@ def render_deepdive(budget):
         viewed.append(ticker)
     st.session_state["_viewed_tickers"] = viewed[-10:]  # keep last 10
 
-    # ISIN → ticker lookup
+    # ISIN resolution — from direct input OR lookup by ticker
     isin = None
     if len(ticker) == 12 and ticker[:2].isalpha():
+        # User typed an ISIN directly
         isin = ticker
-        # Look up in justETF
         if not get_jetf_df().empty and "isin" in get_jetf_df().columns:
             match = get_jetf_df()[get_jetf_df()["isin"] == isin]
             if not match.empty:
                 ticker = match.iloc[0]["ticker"]
+    else:
+        # Look up ISIN for this ticker from universe or justETF df
+        for _df, _tcol, _icol in [
+            (get_jetf_df(),    "ticker", "isin"),
+            (get_universe(),   "ticker", "isin"),
+            (get_signals_df(), "ticker", "isin"),
+        ]:
+            if _df.empty or _tcol not in _df.columns or _icol not in _df.columns:
+                continue
+            _match = _df[_df[_tcol] == ticker]
+            if not _match.empty:
+                _isin = str(_match.iloc[0].get(_icol, "")).strip()
+                if _isin and len(_isin) == 12 and _isin[:2].isalpha() and _isin not in ("nan","None",""):
+                    isin = _isin
+                    break
 
     with st.spinner(f"{'🔄 Force-refreshing' if force_refr else 'Fetching'} {ticker}…"):
         raw = fetch_ticker_data(ticker, isin=isin, force_refresh=True)  # always live in Deep Dive
